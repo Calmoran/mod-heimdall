@@ -66,7 +66,36 @@ Create an `#open-a-ticket` panel channel, an Open Tickets category, and a
 Claimed Tickets category. Copy their IDs and the role IDs into the environment
 file. Place the Bot role above roles whose channel permissions it must manage.
 
-## 3. Configure private storage and secrets
+## 3. Enable SOAP and create the account the bot uses
+
+The bot makes every in-game change through AzerothCore's SOAP service, so it needs that service
+switched on and an account to authenticate with. Neither is created for you.
+
+In `worldserver.conf`:
+
+```
+SOAP.Enabled = 1
+SOAP.IP = "127.0.0.1"
+SOAP.Port = 7878
+```
+
+Keep it on loopback. It accepts GM commands, so exposing it publicly is the same as handing out a
+console.
+
+Then create a dedicated game account for the bot and give it GM rights, at the worldserver console:
+
+```
+account create heimdallsoap <a strong password>
+account set gmlevel heimdallsoap 3 -1
+```
+
+The level matters: the bot assigns and closes tickets, and a lower level fails with a permission
+error that looks like a bug. Use a separate account rather than a person's, so its actions are
+identifiable in the command audit log.
+
+Put that account's name and password in `SOAP_USER` and `SOAP_PASSWORD`, and the URL in `SOAP_URL`.
+
+## 4. Configure private storage and secrets
 
 On the server, create a dedicated unprivileged account and paths:
 
@@ -81,7 +110,7 @@ Copy `.env.example` to the environment location and replace every placeholder.
 Keep MySQL and SOAP loopback-only. The token, database password, SOAP password,
 and environment file must never be committed or shared in tickets/screenshots.
 
-## 4. Install and start
+## 5. Install and start
 
 Install Node.js 20 or later and production dependencies, copy
 `deploy/heimdall-bot.service` to the system service directory, review its
@@ -89,7 +118,7 @@ paths, reload service definitions, enable it, and start it. Follow your Linux
 distribution's normal service-management procedure. The bot opens no public web
 listener; it connects out to Discord and locally to MySQL/SOAP.
 
-## 5. Running the bot on your platform
+## 6. Running the bot on your platform
 
 > **Only Windows has been run.** Everything in this section for Linux and Docker is written from the
 > code and from the platform's normal conventions, and has never been executed. Treat it as a
@@ -124,7 +153,7 @@ container, and it must not be inside a web root.
 
 Keep SOAP and MySQL bound to loopback or to the internal network. Do not publish either port.
 
-## 6. Things that will bite you
+## 7. Things that will bite you
 
 Collected from a clean AzerothCore build done from scratch. None of these are Heimdall's doing, but
 all of them cost someone an afternoon.
@@ -144,7 +173,7 @@ all of them cost someone an afternoon.
   both on purpose; granting only one produces an access-denied error that reads exactly like a wrong
   password.
 
-## 7. Upgrading
+## 8. Upgrading
 
 1. Read the release notes and back up the `heimdall_*` tables together with the archive directory.
 2. Stop the bot.
@@ -165,7 +194,7 @@ Rolling back: stop the bot, restore the previous code and configuration, and reb
 if the module changed. Restore the table backup only if a migration cannot be carried forward. Do
 not edit `gm_ticket` to force a rollback.
 
-## 8. Fresh-install verification
+## 9. Fresh-install verification
 
 1. The bot starts without printing secrets and posts one panel, not a duplicate.
 2. A player creates Support, Bug Report, and Player Report tickets; each receives
