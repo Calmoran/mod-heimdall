@@ -86,6 +86,8 @@ These are not ours to change.
 
 ## Things Heimdall does not do
 
+- On stock AzerothCore it needs one small core patch to hold a GM identity in the world. The patch
+  ships with the module, changes no behaviour, and is not needed on mod-playerbots based cores.
 - It never writes to `gm_ticket`. Every in-game change goes through documented GM commands over
   SOAP.
 - It does not give the bot access to player data. The bot's database account reaches only the seven

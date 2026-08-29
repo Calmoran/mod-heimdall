@@ -5,8 +5,9 @@ realm. Do not start on a public realm.
 
 ## 1. Install the module first
 
-Follow the module installation guide. Confirm its SQL tables exist in the
-Characters database. Keep the bot account limited to those tables using
+Follow the module installation guide. On stock AzerothCore that includes applying one small core
+patch before building; cores based on mod-playerbots do not need it. Confirm its SQL tables exist in
+the Characters database. Keep the bot account limited to those tables using
 `deploy/mysql-grants.sql`; replace every placeholder before running it.
 
 That file creates the account for both `@localhost` and `@127.0.0.1`, and you
@@ -179,16 +180,18 @@ all of them cost someone an afternoon.
 2. Stop the bot.
 3. Update both trees.
 4. Apply any module SQL the release names, in order.
-5. **Rebuild the worldserver if the module changed** — anything touching `modules/mod-heimdall/src`
+5. **On stock AzerothCore, reapply the core patch if you also updated the core.** A core update can
+   revert it. Forgetting shows up as a compile failure, not as odd behaviour.
+6. **Rebuild the worldserver if the module changed** — anything touching `modules/mod-heimdall/src`
    or its `.conf.dist`. A release that only changes the bot does not need a rebuild; a release that
    changes the module does, and the module will not behave as documented until you do. Release notes
    say which.
-6. Compare your `heimdall.conf` against the new `heimdall.conf.dist` and add any new options. The
+7. Compare your `heimdall.conf` against the new `heimdall.conf.dist` and add any new options. The
    worldserver warns about missing ones at startup and falls back to compiled defaults.
-7. Compare your `.env` against `.env.example` the same way.
-8. Start the worldserver, then the bot, and read both logs. The bot's permissions preflight runs at
+8. Compare your `.env` against `.env.example` the same way.
+9. Start the worldserver, then the bot, and read both logs. The bot's permissions preflight runs at
    startup and names anything missing.
-9. Smoke test one Discord ticket and one in-game ticket.
+10. Smoke test one Discord ticket and one in-game ticket.
 
 Rolling back: stop the bot, restore the previous code and configuration, and rebuild the worldserver
 if the module changed. Restore the table backup only if a migration cannot be carried forward. Do

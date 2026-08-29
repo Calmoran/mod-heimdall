@@ -28,8 +28,10 @@ security, backup, upgrade, rollback, retention, and troubleshooting procedures
 are in [docs/OPERATIONS.md](docs/OPERATIONS.md) and
 [docs/SECURITY.md](docs/SECURITY.md).
 
-Two-way in-game whisper chat needs no core patch. Each GM identity is a real
-character the module holds in-world with no game client attached, so a whisper
-to it is an ordinary whisper and the stock script hooks are enough.
+Two-way in-game whisper chat works through real characters: each GM identity is a
+character the module holds in-world with no game client attached, so a whisper to
+it is an ordinary whisper and the stock script hooks are enough. The chat path is
+untouched. Holding a character that way needs one small patch to stock AzerothCore,
+shipped with the module and not needed on mod-playerbots based cores.
 
 License: AGPL-3.0-or-later.
