@@ -15,6 +15,30 @@ the game receives the same retention treatment.
 
 Rollback: set `Heimdall.Enabled = 0`, stop the companion bot, and restart the worldserver during maintenance. Keep the module tables for audit and rollback unless the operator explicitly decides to remove them after a backup.
 
+## Keeping the module outside the core tree
+
+AzerothCore discovers modules by looking in `modules/` inside its source tree, which means a module
+checked out there sits inside someone else's repository. That is awkward: the core's `.gitignore`
+excludes `modules/*`, so your module's own history lives somewhere the core does not track and every
+core update is a chance to lose it.
+
+Keeping the module in its own directory and linking it in avoids that. On Windows:
+
+```
+mklink /J "C:\path\to\azerothcore-wotlk\modules\mod-heimdall" "C:\path\to\mod-heimdall"
+```
+
+and on Linux:
+
+```
+ln -s /path/to/mod-heimdall /path/to/azerothcore-wotlk/modules/mod-heimdall
+```
+
+CMake follows the link, so the module is discovered, compiled and registered exactly as if it were
+a real directory. Reconfigure after creating it. Confirm it worked by checking that the generated
+`modules/gen_scriptloader/static/ModulesLoader.cpp` in your build tree calls
+`Addmod_heimdallScripts()` — a module that is not discovered links cleanly and simply does nothing.
+
 ## Where the configuration file goes
 
 `heimdall.conf` must sit in the module configuration directory **beside the worldserver's own
