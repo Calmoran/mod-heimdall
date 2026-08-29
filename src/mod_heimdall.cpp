@@ -1,3 +1,4 @@
+#include "AsyncCallbackProcessor.h"
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "CommandScript.h"
@@ -281,6 +282,13 @@ public:
 
     // Asking for a state the system is already in is success, not failure: a caller that wanted
     // the identity online gets exactly that.
+    // Invoked once per world tick; a completed login runs its continuation here rather than on the
+    // database thread.
+    void Update()
+    {
+        _loginCallbacks.ProcessReadyCallbacks();
+    }
+
     bool Login(std::string name, std::string& message)
     {
         if (!normalizePlayerName(name))
@@ -339,7 +347,15 @@ public:
 
         _pending.insert(guid);
 
-        sWorld->AddQueryHolderCallback(CharacterDatabase.DelayQueryHolder(holder))
+        // Our own callback queue, pumped from the poller's OnUpdate below.
+        //
+        // The core's own login path uses the session's queue, but there is no session yet at this
+        // point - one is created in FinishLogin once the character data has actually loaded. Some
+        // downstream cores expose a World-level queue for exactly this case; upstream does not, and
+        // depending on it would mean the module built on one core and not the other.
+        // AsyncCallbackProcessor is a header-only template both cores carry unchanged, so owning
+        // one here needs nothing from either.
+        _loginCallbacks.AddCallback(CharacterDatabase.DelayQueryHolder(holder))
             .AfterComplete([name, accountId, guid](SQLQueryHolderBase const& queryHolder)
             {
                 IdentityRegistry::instance()->FinishLogin(name, accountId, guid, static_cast<LoginQueryHolder const&>(queryHolder));
@@ -505,6 +521,7 @@ private:
     std::map<std::string, Identity> _identities;
     std::unordered_set<ObjectGuid> _heldGuids;
     std::unordered_set<ObjectGuid> _pending;
+    AsyncCallbackProcessor<SQLQueryHolderCallback> _loginCallbacks;
     std::string _realmTag;
 };
 
@@ -644,6 +661,7 @@ public:
         if (!_settings.enabled)
             return;
 
+        IdentityRegistry::instance()->Update();
         PollDeliveries(diff);
         UpdateCommandAudit(diff);
         SweepPlayerContext(diff);
