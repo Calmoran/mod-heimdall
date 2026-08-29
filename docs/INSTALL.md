@@ -1,23 +1,33 @@
 # Module installation
 
 1. Start from a supported AzerothCore source tree and put this directory in its `modules/` folder. Cloning it there works; linking it in from its own directory is better, and is described under "Keeping the module outside the core tree" below.
-2. Reconfigure and rebuild AzerothCore so its module loader includes `mod-heimdall`. Modules are controlled by the `MODULES` CMake variable, which must not be `none`:
+2. **On stock AzerothCore, apply the core patch first.** From the root of your core checkout:
+
+   ```
+   git apply modules/mod-heimdall/patches/0001-expose-loginqueryholder-to-modules.patch
+   ```
+
+   It moves a class declaration into a header so the module can build the same login query the
+   core's own login path builds. Fifteen lines, no behaviour change. Cores based on mod-playerbots
+   already carry the equivalent and must skip this step - the patch will refuse to apply, which is
+   the correct outcome. See [patches/README.md](../patches/README.md).
+3. Reconfigure and rebuild AzerothCore so its module loader includes `mod-heimdall`. Modules are controlled by the `MODULES` CMake variable, which must not be `none`:
 
    ```
    cmake -S <source> -B <build> -DMODULES=static
    ```
 
    Confirm it worked before building: the configure output should list `mod-heimdall`, and the generated `modules/gen_scriptloader/static/ModulesLoader.cpp` in your build tree should call `Addmod_heimdallScripts()`. A module the build does not discover produces no error at all - it simply is not there.
-3. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first. The connection details are in your `worldserver.conf` under `CharacterDatabaseInfo`:
+4. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first. The connection details are in your `worldserver.conf` under `CharacterDatabaseInfo`:
 
    ```
    mysql -h <host> -P <port> -u <user> -p <characters_database> < data/sql/db_characters/base/heimdall.sql
    ```
 
    It creates seven tables named `heimdall_*` and touches nothing else. Running it twice is safe.
-4. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
-5. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
-6. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
+5. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
+6. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
+7. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
 
 The module only reads `gm_ticket`. All in-game lifecycle changes must use documented AzerothCore GM commands over the existing loopback SOAP service; never grant the bot write access to `gm_ticket`.
 
@@ -77,11 +87,16 @@ documentation still names the OpenSSL 3 filenames while a recent build links Ope
 the core, but no one has done it. Please report what was wrong.
 
 **Docker — untested.** The module is compiled into the worldserver, so it goes in at image build
-time: add the source under `modules/` before the build step and rebuild the image. Adding the module
+time: add the source under `modules/` and apply the core patch before the build step, then rebuild
+the image. Adding the module
 to a running container does nothing — a module cannot be loaded without rebuilding the worldserver
 binary.
 
 ## Rebuilding after an update
+
+**On stock AzerothCore, a core update can revert the patch.** Reapply it before rebuilding. You will
+know if you forget: the module fails to compile with `use of undefined type 'LoginQueryHolder'`. It
+cannot silently half-work.
 
 Any change under `src/` requires reconfiguring and rebuilding the worldserver. The module is
 statically linked; there is no plugin to swap. A release that changes only the companion bot needs no

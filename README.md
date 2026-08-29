@@ -14,10 +14,16 @@ in the sibling `heimdall-bot` project.
 
 ## Two-way whisper chat
 
-Two-way in-game chat needs no core patch. Each GM identity is a real character the
-module holds in-world with no game client attached, so a whisper addressed to it is
-an ordinary whisper that the stock script hooks already see. Nothing bypasses normal
-whisper validation.
+Each GM identity is a real character the module holds in-world with no game client
+attached, so a whisper addressed to it is an ordinary whisper that the stock script
+hooks already see. Nothing bypasses normal whisper validation, and the chat path
+itself is untouched.
+
+Holding a character that way needs one small patch to stock AzerothCore, shipped in
+[patches/](patches/): it moves a class declaration into a header so a module can build
+the login query the core's own login path builds. Fifteen lines, no behaviour change.
+Cores based on mod-playerbots already carry the equivalent and need nothing. A pull
+request to upstream it is planned, after which the patch step disappears.
 
 See [docs/INSTALL.md](docs/INSTALL.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 The companion bot ships the operator documentation, including its limits reference.
