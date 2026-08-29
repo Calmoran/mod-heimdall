@@ -1,0 +1,26 @@
+# Secrets and local configuration. Never commit any of these.
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Logs and their rotations
+*.log
+*.log.*
+
+# Private attachment storage
+archive/
+var/
+
+# Backups and scratch files of every shape
+*.bak
+*.bak-*
+*.orig
+*.rej
+*~
+probe-tmp.mjs
+perm*-tmp.mjs
+url-tmp.mjs
+perms-tmp.mjs
