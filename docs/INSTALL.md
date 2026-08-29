@@ -1,7 +1,13 @@
 # Module installation
 
-1. Start from a supported AzerothCore source tree and add this directory as a module using the official module guide: <https://www.azerothcore.org/wiki/create-a-module>.
-2. Reconfigure and rebuild AzerothCore so its module loader includes `mod-heimdall`.
+1. Start from a supported AzerothCore source tree and put this directory in its `modules/` folder. Cloning it there works; linking it in from its own directory is better, and is described under "Keeping the module outside the core tree" below.
+2. Reconfigure and rebuild AzerothCore so its module loader includes `mod-heimdall`. Modules are controlled by the `MODULES` CMake variable, which must not be `none`:
+
+   ```
+   cmake -S <source> -B <build> -DMODULES=static
+   ```
+
+   Confirm it worked before building: the configure output should list `mod-heimdall`, and the generated `modules/gen_scriptloader/static/ModulesLoader.cpp` in your build tree should call `Addmod_heimdallScripts()`. A module the build does not discover produces no error at all - it simply is not there.
 3. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first.
 4. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
 5. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
