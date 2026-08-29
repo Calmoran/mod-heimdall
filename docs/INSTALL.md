@@ -67,7 +67,9 @@ printed.
 ## Platform notes
 
 **Windows — tested.** Build with the Visual Studio generator. Limit parallelism if the build fails
-with `C3859` or system error `1455`: `--parallel 2 -- /p:CL_MPCount=2`. CMake does not copy the MySQL
+with `C3859` or system error `1455`: `--parallel 2 -- /p:CL_MPCount=2`. Run that from PowerShell or
+`cmd`, not from Git Bash - a POSIX shell rewrites the `/p:` switch into something MSBuild rejects
+with `MSB1008: Only one project can be specified`. CMake does not copy the MySQL
 and OpenSSL runtime DLLs beside the executables; copy them yourself, and note that current upstream
 documentation still names the OpenSSL 3 filenames while a recent build links OpenSSL 4.
 
