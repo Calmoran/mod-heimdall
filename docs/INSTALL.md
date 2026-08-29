@@ -8,7 +8,13 @@
    ```
 
    Confirm it worked before building: the configure output should list `mod-heimdall`, and the generated `modules/gen_scriptloader/static/ModulesLoader.cpp` in your build tree should call `Addmod_heimdallScripts()`. A module the build does not discover produces no error at all - it simply is not there.
-3. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first.
+3. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first. The connection details are in your `worldserver.conf` under `CharacterDatabaseInfo`:
+
+   ```
+   mysql -h <host> -P <port> -u <user> -p <characters_database> < data/sql/db_characters/base/heimdall.sql
+   ```
+
+   It creates seven tables named `heimdall_*` and touches nothing else. Running it twice is safe.
 4. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
 5. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
 6. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
