@@ -1,0 +1,53 @@
+# Module installation
+
+1. Start from a supported AzerothCore source tree and add this directory as a module using the official module guide: <https://www.azerothcore.org/wiki/create-a-module>.
+2. Reconfigure and rebuild AzerothCore so its module loader includes `mod-heimdall`.
+3. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first.
+4. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
+5. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
+6. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
+
+The module only reads `gm_ticket`. All in-game lifecycle changes must use documented AzerothCore GM commands over the existing loopback SOAP service; never grant the bot write access to `gm_ticket`.
+
+Set `Heimdall.ArchiveRetentionDays` to the same value as the companion
+bot's `TRANSCRIPT_RETENTION_DAYS` so an in-game ticket that the player closes in
+the game receives the same retention treatment.
+
+Rollback: set `Heimdall.Enabled = 0`, stop the companion bot, and restart the worldserver during maintenance. Keep the module tables for audit and rollback unless the operator explicitly decides to remove them after a backup.
+
+## Where the configuration file goes
+
+`heimdall.conf` must sit in the module configuration directory **beside the worldserver's own
+config**, not beside the module source. Find `worldserver.conf` and put it in the `modules`
+directory next to it:
+
+- typical Windows install: `...\server\configs\modules\heimdall.conf`
+- typical Linux install: `.../etc/modules/heimdall.conf`
+
+On Windows the install rules may not honour the `CONF_DIR` you passed to CMake. Locate
+`worldserver.conf.dist` on disk and work from there rather than from what the configure summary
+printed.
+
+## Platform notes
+
+**Windows — tested.** Build with the Visual Studio generator. Limit parallelism if the build fails
+with `C3859` or system error `1455`: `--parallel 2 -- /p:CL_MPCount=2`. CMake does not copy the MySQL
+and OpenSSL runtime DLLs beside the executables; copy them yourself, and note that current upstream
+documentation still names the OpenSSL 3 filenames while a recent build links OpenSSL 4.
+
+**Linux — untested.** Nothing in this module is Windows-specific and it should build with the rest of
+the core, but no one has done it. Please report what was wrong.
+
+**Docker — untested.** The module is compiled into the worldserver, so it goes in at image build
+time: add the source under `modules/` before the build step and rebuild the image. Adding the module
+to a running container does nothing — a module cannot be loaded without rebuilding the worldserver
+binary.
+
+## Rebuilding after an update
+
+Any change under `src/` requires reconfiguring and rebuilding the worldserver. The module is
+statically linked; there is no plugin to swap. A release that changes only the companion bot needs no
+rebuild.
+
+Before testing a change, confirm the installed `worldserver` binary is newer than the module source.
+A stale binary produces results that look like bugs in your configuration.

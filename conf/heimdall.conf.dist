@@ -1,0 +1,99 @@
+###################################################################################################
+# mod-heimdall
+#
+# Copy this file to heimdall.conf in the worldserver modules config directory.
+# This module never contacts Discord. A separately deployed companion bot reads and writes only the
+# heimdall_* tables in the Characters database.
+###################################################################################################
+
+[worldserver]
+
+# Enable the game-side bridge.
+Heimdall.Enabled = 0
+
+# Short tag identifying this realm in ticket keys, 1-16 letters or digits (for example "ARCA",
+# giving keys like ARCA-42). Leave blank to derive it from this worldserver's RealmID instead,
+# giving keys like R1-42. "DIS" is reserved, because that is how the companion bot labels
+# tickets opened from Discord. An invalid or reserved value is refused at startup and the bridge
+# stays disabled rather than writing keys that would collide with another realm sharing the
+# database. A short tag reads better in Discord; the width is headroom, since the automatic
+# fallback is at most "R255" - worldserver refuses a RealmID above 255.
+Heimdall.RealmPrefix = ""
+
+# What the very first poll on this realm does with the ticket history already in gm_ticket. Only
+# consulted when the realm has no watermark recorded yet, so changing it later does nothing.
+#   open  Import tickets that are still open. Closed history stays in gm_ticket and is never
+#         given a Discord channel. This is the default.
+#   none  Start completely empty. Tickets filed after the first run are picked up normally.
+#   all   Import every ticket ever filed. On an established realm this creates one Discord channel
+#         per ticket - thousands of them, well past Discord's rate limits, and each one has to be
+#         deleted by hand afterwards. Only choose this on a realm with little or no history.
+Heimdall.FirstRunImport = "open"
+
+# Seconds between read-only scans of AzerothCore's gm_ticket table.
+Heimdall.TicketPollSeconds = 15
+
+# Seconds between attempts to deliver queued player-facing messages after login.
+Heimdall.DeliveryPollSeconds = 5
+
+# Comma-separated character names, one per GM identity. Each is held in-world with no game
+# client attached so players can whisper it like any other character, and replies are delivered
+# as whispers from it. Leave blank to disable identity handling entirely, in which case the
+# module only polls tickets. A name that does not exist is warned about and skipped.
+# Use characters on accounts nobody plays: the module refuses to take over an account that is
+# connected, and stands down if a client later logs in on one.
+Heimdall.GmIdentities = ""
+
+# Maximum UTF-8 bytes in one WoW whisper segment. AzerothCore's chat path limits messages to 255,
+# and values outside 32-255 are clamped into that range at startup.
+Heimdall.MaxWhisperBytes = 240
+
+# Days a closed in-game ticket's transcript is kept. Applied when the poll first sees the ticket
+# closed, whether it was closed by a GM, abandoned by the player, or lost with a deleted character.
+Heimdall.ArchiveRetentionDays = 180
+
+# OPTIONAL EXTRA, OFF BY DEFAULT. Post every GM command attempt to an admin-only Discord channel,
+# for accountability. Covers commands typed in game and anything run through the console, which
+# includes the companion bot's own SOAP commands.
+# This has nothing to do with tickets and many servers already log commands their own way. Left
+# at 0 the hook is never registered, no Discord channel is created, and no rows are written.
+Heimdall.CommandAuditEnabled = 0
+
+# Only log commands from sessions at or above this security level. 0 logs everyone including
+# ordinary players, which on a busy realm is a great deal of traffic; 1 and above is staff only.
+Heimdall.CommandAuditMinSecurity = 1
+
+# Commands are batched into one Discord message rather than one message each. A batch is sent
+# when it reaches MaxLines, or when BatchSeconds have passed since the first line in it.
+# MaxLines is clamped to 1-100.
+Heimdall.CommandAuditBatchSeconds = 10
+Heimdall.CommandAuditMaxLines = 25
+
+# Seconds between refreshes of the player context card shown to staff. Slower than the ticket
+# poll on purpose: it reads the characters and auth databases, and a card a minute out of date is
+# fine. Staff can force an immediate refresh from the ticket's staff thread. Values below 10 are
+# raised to 10.
+Heimdall.ContextRefreshSeconds = 60
+
+###################################################################################################
+# Sending Heimdall's output to its own file
+#
+# The module logs through AzerothCore's own logging under the category "module.heimdall", so it is
+# configured in worldserver.conf rather than here. Without an entry of its own it inherits
+# Logger.module, which mixes it in with every other module.
+#
+# To give it a file, add these two lines to worldserver.conf, in the Appenders and Loggers sections
+# respectively:
+#
+#     Appender.Heimdall=2,5,0,Heimdall.log,w
+#     Logger.module.heimdall=4,Console Heimdall
+#
+# The file appears in the server's Logs directory. On the Appender line the fields are, in order:
+# type 2 (file), level 5 (Debug, so the file is willing to accept anything), flags 0, filename, and
+# "w" to truncate on restart - use "a" to append across restarts instead. On the Logger line, 4 is
+# Info: what actually gets emitted.
+#
+# AzerothCore's levels count upwards in verbosity: 1 Fatal, 2 Error, 3 Warning, 4 Info, 5 Debug,
+# 6 Trace. To capture the per-poll detail while diagnosing a problem, raise the Logger line from 4
+# to 5, restart, and reproduce. Debug is far more verbose and is not meant to be left on.
+###################################################################################################

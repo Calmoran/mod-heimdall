@@ -1,0 +1,16 @@
+# Nothing here is generated, and no secret belongs in this tree. These exist so a working copy
+# beside a build cannot leak one in.
+
+# Local or deployed configuration. Only the .dist template is committed.
+*.conf
+!*.conf.dist
+
+# Backups and scratch files of every shape
+*.bak
+*.bak-*
+*.orig
+*.rej
+*~
+
+# Build artefacts, if anyone configures in-tree
+build/
