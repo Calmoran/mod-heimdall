@@ -102,3 +102,7 @@ These are not ours to change.
 - It does not link Discord accounts to game accounts, so it cannot offer self-service actions that
   act on a character.
 - It does not send item or gold compensation.
+- Replies whisper from a real GM character carrying the client's `<GM>` badge
+  (`Heimdall.GmChatTag`, default on) — a protocol flag a player character cannot forge.
+- The GM command audit channel exists unless `COMMAND_AUDIT_CHANNEL` is switched off, which
+  silences both of its writers at once.

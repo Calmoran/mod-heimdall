@@ -59,8 +59,11 @@ scope, not a permission, and it governs the commands rather than the bot's acces
 preflight, so a guild that grants it never finds out whether the permissions are actually right.
 
 Check the same permissions are not denied by an overwrite on the ticket categories, the panel
-channel, or the queue board channel. The bot checks all six places at startup and names anything
-missing.
+channel, or the queue board channel. The bot checks every permission in all seven places at startup —
+the server, the four categories, the panel and the queue board — reports both how many places it
+could check and how many it expected, and **stops** if a permission it cannot work without is
+missing, naming each one and where. It does not start half-working: a ticket system that runs while
+unable to see ticket channels tells players they have reached someone when nobody comes.
 
 Create or retain three guild roles: **Admin, Moderator and Game Master**. Copy their IDs into the
 environment file.

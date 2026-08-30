@@ -37,8 +37,9 @@ channels it can neither read nor repair.
 
 The bot provisions its own Open, Claimed and Closed ticket categories, its panel
 channel and its staff-only ticket queue channel on first run, storing their IDs in
-`heimdall_setting`. The GM command audit channel is created only if that
-module option is switched on.
+`heimdall_setting`. The GM command audit channel is created by whichever
+producer first has something to record, unless `COMMAND_AUDIT_CHANNEL` is
+switched off (see below).
 `DISCORD_PANEL_CHANNEL_ID`, `DISCORD_OPEN_CATEGORY_ID`,
 `DISCORD_CLAIMED_CATEGORY_ID` and `DISCORD_CLOSED_CATEGORY_ID` are therefore
 optional; set one only to pin the bot to a channel you made yourself, and it

@@ -305,13 +305,13 @@ function adminService() {
   service.repository = {
     upsertStaff: async (...args) => { seen.upsert.push(args) },
     disableStaff: async (...args) => { seen.disable.push(args) },
-    listStaff: async () => [{ discord_user_id: '900', gm_name: 'Spikebot', enabled: 1 }],
+    listStaff: async () => [{ discord_user_id: '900', gm_name: 'Helpbot', enabled: 1 }],
     reopen: async (...args) => { seen.reopen.push(args); return ticket },
     reassign: async (...args) => { seen.reassign.push(args); return ticket },
-    staff: async () => ({ gm_name: 'Spikebot' }),
+    staff: async () => ({ gm_name: 'Helpbot' }),
     ticketsWithOpenWork: async () => [ticket],
     getThreadId: async () => 'thread-7',
-    gmIdentityNames: async () => ['Spikebot'],
+    gmIdentityNames: async () => ['Helpbot'],
   }
   service.refreshQueueBoard = async () => {}
   service.refreshTicketHeader = async () => {}
@@ -327,7 +327,7 @@ function adminInteraction(subcommand, roles = ['role-admin']) {
     options: {
       getSubcommand: () => subcommand,
       getUser: () => ({ id: '900', toString: () => '<@900>' }),
-      getString: () => 'Spikebot',
+      getString: () => 'Helpbot',
       getInteger: () => 7,
     },
     reply: async (payload) => { replies.push(payload); return payload },
@@ -355,7 +355,7 @@ test('staff-add rosters the member, joins them to open threads, and counts them'
   const interaction = adminInteraction('staff-add')
   await service.handleAdminCommand(interaction)
 
-  assert.deepEqual(seen.upsert, [['900', 'Spikebot']], 'the mapping was not saved')
+  assert.deepEqual(seen.upsert, [['900', 'Helpbot']], 'the mapping was not saved')
   assert.deepEqual(seen.threadAdds, ['900'], 'the new staff member was not added to the open thread')
   assert.equal(seen.unarchived, 1, 'an archived thread was not reopened before adding')
   assert.match(interaction.replies[0].content, /Added to 1 open ticket thread/)
@@ -489,7 +489,7 @@ function replyService(online) {
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
   service.config = { adminRoleId: 'role-admin', moderatorRoleId: 'role-mod', gmRoleId: 'role-gm' }
   service.repository = {
-    staff: async () => ({ gm_name: 'Spikebot' }),
+    staff: async () => ({ gm_name: 'Helpbot' }),
     getSetting: async () => 'held',
     enqueue: async (job) => { sent.push(job) },
     recordMessage: async () => {},
@@ -502,8 +502,8 @@ function replyService(online) {
 }
 
 const REPLY_TICKET = {
-  id: 3, public_key: 'R1-3', source: 'ingame', realm_tag: 'R1', player_name: 'Annoyingass',
-  claimant_discord_user_id: '100', claimant_gm_name: 'Spikebot',
+  id: 3, public_key: 'R1-3', source: 'ingame', realm_tag: 'R1', player_name: 'Dustpaw',
+  claimant_discord_user_id: '100', claimant_gm_name: 'Helpbot',
 }
 
 function replyInteraction() {
@@ -526,7 +526,7 @@ test('a reply to an online player is not reported as if it were queued', async (
   const interaction = replyInteraction()
   await service.replyToPlayer(interaction, REPLY_TICKET, 'Have a look now please')
   assert.equal(sent.length, 1)
-  assert.match(interaction.replies[0].content, /Delivering now — Annoyingass is online\./)
+  assert.match(interaction.replies[0].content, /Delivering now — Dustpaw is online\./)
 })
 
 test('a reply to an offline player still says it is waiting for them', async () => {
@@ -534,7 +534,7 @@ test('a reply to an offline player still says it is waiting for them', async () 
     const { service } = replyService(context)
     const interaction = replyInteraction()
     await service.replyToPlayer(interaction, REPLY_TICKET, 'Have a look when you are back')
-    assert.match(interaction.replies[0].content, /It will arrive when Annoyingass is online\./)
+    assert.match(interaction.replies[0].content, /It will arrive when Dustpaw is online\./)
   }
 })
 
@@ -667,20 +667,20 @@ function identityService(names) {
 }
 
 test('staff-add refuses a GM name the realm has not accepted, and lists the real ones', async () => {
-  const { service } = identityService(['Spikebot', 'Helpdesk'])
-  await assert.rejects(() => service.assertConfiguredIdentity('Spikeplay'), (error) => {
-    assert.match(error.message, /"Spikeplay" is not a configured GM identity/)
-    assert.match(error.message, /Spikebot, Helpdesk/)
+  const { service } = identityService(['Helpbot', 'Helpdesk'])
+  await assert.rejects(() => service.assertConfiguredIdentity('Helpbat'), (error) => {
+    assert.match(error.message, /"Helpbat" is not a configured GM identity/)
+    assert.match(error.message, /Helpbot, Helpdesk/)
     return true
   })
-  await assert.doesNotReject(() => service.assertConfiguredIdentity('Spikebot'))
+  await assert.doesNotReject(() => service.assertConfiguredIdentity('Helpbot'))
   // The realm is case-insensitive about character names and so is this.
-  await assert.doesNotReject(() => service.assertConfiguredIdentity('spikebot'))
+  await assert.doesNotReject(() => service.assertConfiguredIdentity('helpbot'))
 })
 
 test('an empty identity list is explained rather than blamed on the name', async () => {
   const { service } = identityService([])
-  await assert.rejects(() => service.assertConfiguredIdentity('Spikebot'), /No GM identities are configured/)
+  await assert.rejects(() => service.assertConfiguredIdentity('Helpbot'), /No GM identities are configured/)
 })
 
 test('a module that has not published its list warns instead of blocking', async () => {
@@ -751,7 +751,7 @@ function closureService({ status = 'closed', alreadyHandled = false } = {}) {
   const seen = { enqueued: [], sent: [], refreshed: [], audited: [] }
   const ticket = {
     id: 9, public_key: 'R1-9', source: 'ingame', source_ticket_id: 42, realm_tag: 'R1',
-    status, discord_channel_id: 'chan-9', player_name: 'Annoyingass',
+    status, discord_channel_id: 'chan-9', player_name: 'Dustpaw',
   }
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }

@@ -10,6 +10,10 @@ import { HeimdallService, ticketAdminCommand } from './discord.js'
 import { TicketRepository } from './repository.js'
 import { SoapClient } from './soap.js'
 
+// The version answers the first question on any bug report. Read from package.json rather than
+// duplicated here, so it cannot disagree with what npm believes is installed.
+const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+
 function loadEnvironmentFile(filename = process.env.HEIMDALL_ENV_FILE) {
   if (!filename || !fs.existsSync(filename)) return
   for (const line of fs.readFileSync(filename, 'utf8').split(/\r?\n/)) {
@@ -67,7 +71,7 @@ async function main() {
   // The run id and pid are logged because "am I running twice?" has to be answerable from the log
   // alone. Without them a log holding nine "Heimdall bot starting" lines says nothing about which
   // process wrote any of the lines after them.
-  logger.info('Heimdall bot starting', { level: config.log.level, logFile: logger.path, runId: config.runId, pid: process.pid })
+  logger.info('Heimdall bot starting', { version: VERSION, level: config.log.level, logFile: logger.path, runId: config.runId, pid: process.pid })
   const pool = mysql.createPool({ ...config.mysql, waitForConnections: true, connectionLimit: 5, queueLimit: 20, enableKeepAlive: true })
   const repository = new TicketRepository(pool, config.runId, config.instanceId)
   // Before the Discord login, so a second instance never reaches the gateway and never sees an

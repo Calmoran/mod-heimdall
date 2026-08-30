@@ -1907,7 +1907,7 @@ ${chunk}\`\`\``,
     }
   }
 
-  // validateGmName is a format check, so "Spikeplay" for "Spikebot" was accepted here and surfaced
+  // validateGmName is a format check, so "Helpbat" for "Helpbot" was accepted here and surfaced
   // much later as a SOAP refusal - to a GM, mid-conversation with a player. The module knows the
   // real list, because it resolves each configured name against the realm at startup and discards
   // the ones that are not usable characters; it publishes what survived. This moves the discovery
