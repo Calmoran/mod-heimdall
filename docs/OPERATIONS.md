@@ -3,7 +3,10 @@
 ## Staff operations
 
 Administrators use `/ticket staff-add`, `/ticket staff-remove`, and
-`/ticket staff-list` to maintain mappings. Eligible Discord role plus an enabled
+`/ticket staff-list` to maintain mappings. Any staff member can run
+`/ticket refresh` inside a ticket channel (or with a ticket id from anywhere) to
+redraw its header and controls — useful after an upgrade, since headers
+otherwise only redraw when the ticket changes state. Eligible Discord role plus an enabled
 mapping is required to claim or send a player-facing reply. Admins may reassign,
 reopen, and close tickets.
 

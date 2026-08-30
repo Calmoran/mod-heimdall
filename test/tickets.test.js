@@ -293,7 +293,7 @@ function adminService() {
     members: { add: async (id) => { seen.threadAdds.push(id) } },
     setArchived: async () => { seen.unarchived += 1 },
   }
-  const channel = { setParent: async () => {}, permissionOverwrites: { set: async () => {} } }
+  const channel = { id: 'chan-7', setParent: async () => {}, permissionOverwrites: { set: async () => {} } }
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
   service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-mod', 'role-gm'] }
@@ -313,6 +313,8 @@ function adminService() {
     ticketsWithOpenWork: async () => [ticket],
     getThreadId: async () => 'thread-7',
     gmIdentityNames: async () => ['Helpbot'],
+    getTicket: async () => ticket,
+    getTicketByChannel: async () => ticket,
   }
   service.refreshQueueBoard = async () => {}
   service.refreshTicketHeader = async () => {}
@@ -331,7 +333,10 @@ function adminInteraction(subcommand, roles = ['role-admin']) {
       getString: () => 'Helpbot',
       getInteger: () => 7,
     },
+    channel: null,
     reply: async (payload) => { replies.push(payload); return payload },
+    deferReply: async () => {},
+    editReply: async (payload) => { replies.push(payload); return payload },
   }
 }
 
@@ -341,7 +346,7 @@ function adminInteraction(subcommand, roles = ['role-admin']) {
 // every declared subcommand through the real prototype makes a missing method a test failure.
 test('every /ticket admin subcommand runs against the real service', async () => {
   const declared = ticketAdminCommand().toJSON().options.map((option) => option.name)
-  assert.ok(declared.length >= 5, 'the admin command lost subcommands')
+  assert.ok(declared.length >= 6, 'the admin command lost subcommands')
   for (const name of declared) {
     const { service } = adminService()
     const interaction = adminInteraction(name)
@@ -1108,4 +1113,36 @@ test('an empty roster on an in-game ticket warns in the channel, since there is 
   assert.match(notice.content, /<@&role-admin>/)
   assert.match(notice.content, /nobody can claim/)
   assert.equal(sent.threadCreated, 0)
+})
+
+test('/ticket refresh redraws for staff, without the admin gate', async () => {
+  const { service, seen } = adminService()
+  const redrawn = []
+  service.refreshVisibility = async (channel, ticket) => { redrawn.push(ticket.public_key) }
+  service.client = { channels: { fetch: async () => ({ id: 'chan-7' }) } }
+
+  // A moderator - decidedly not an admin - inside the ticket channel.
+  const interaction = adminInteraction('refresh', ['role-mod'])
+  interaction.options.getInteger = () => null
+  interaction.channel = { id: 'chan-7', isThread: () => false }
+  await service.handleAdminCommand(interaction)
+
+  assert.deepEqual(redrawn, ['R1-7'], 'the ticket was not redrawn')
+  assert.match(interaction.replies[0].content, /R1-7 redrawn/)
+
+  // But someone with no staff role at all is still refused.
+  const stranger = adminInteraction('refresh', ['bystander'])
+  await assert.rejects(() => service.handleAdminCommand(stranger), /staff or admin role/)
+
+  // And the admin gate still holds for everything that changes state.
+  await assert.rejects(() => service.handleAdminCommand(adminInteraction('staff-list', ['role-mod'])), /Only administrators/)
+})
+
+test('/ticket refresh outside a ticket channel asks for a ticket id', async () => {
+  const { service } = adminService()
+  service.repository.getTicketByChannel = async () => null
+  const interaction = adminInteraction('refresh', ['role-mod'])
+  interaction.options.getInteger = () => null
+  interaction.channel = { id: 'somewhere-else', isThread: () => false }
+  await assert.rejects(() => service.handleAdminCommand(interaction), /inside a ticket channel, or pass ticket_id/)
 })

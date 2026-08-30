@@ -30,6 +30,9 @@ First public release.
   staff-only channel — header, player card, account notes, controls and discussion in one place.
   Discord-opened tickets keep a private staff thread, because the reporter shares that channel and
   must not see staff content.
+- **`/ticket refresh`** redraws a ticket's header and controls on demand — inside the ticket
+  channel, or by ticket id from anywhere. Staff-level, not admin-only. Headers otherwise redraw
+  only when a ticket changes state, which made layout upgrades invisible on open tickets.
 - **Consolidated controls**: three rows — Claim / Reply / a login-logout toggle that acts on the
   identity's actual current state / Close; then Reopen Ticket and the player-card utilities; then
   one GM-actions menu (revive, unstuck, stop combat, teleport, kick last). Two rows of headroom

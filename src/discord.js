@@ -1994,8 +1994,11 @@ ${chunk}\`\`\``,
   }
 
   async handleAdminCommand(interaction) {
-    if (!this.isAdmin(interaction)) throw new Error('Only administrators may use ticket administration commands.')
     const command = interaction.options.getSubcommand()
+    // Refresh is deliberately in front of the admin gate: redrawing a header changes nothing about
+    // the ticket, so any staff member may run it. Everything after the gate changes state.
+    if (command === 'refresh') return this.refreshTicket(interaction)
+    if (!this.isAdmin(interaction)) throw new Error('Only administrators may use ticket administration commands.')
     if (command === 'staff-add') {
       const user = interaction.options.getUser('user', true)
       const gmName = validateGmName(interaction.options.getString('gm_name', true))
@@ -2063,6 +2066,31 @@ ${chunk}\`\`\``,
       + 'the worldserver.')
   }
 
+  // Headers redraw when a ticket changes state, so a change to the layout itself - an upgrade, a
+  // rearranged row - stays invisible on open tickets until something happens to them. This is the
+  // something: run inside a ticket channel (or its staff thread), or name a ticket id from
+  // anywhere. It goes through refreshVisibility, the one operation that owns category, permissions
+  // and headers, so a manual refresh can never disagree with an automatic one.
+  async refreshTicket(interaction) {
+    if (!this.canWork(interaction)) throw new Error('You need a staff or admin role to refresh a ticket.')
+    const ticketId = interaction.options.getInteger('ticket_id')
+    const ticket = ticketId
+      ? await this.repository.getTicket(ticketId)
+      : await (async () => {
+        const channel = this.ticketChannelFrom(interaction)
+        return channel ? this.repository.getTicketByChannel(channel.id) : null
+      })()
+    if (!ticket) throw new Error('Run this inside a ticket channel, or pass ticket_id.')
+    if (!ticket.discord_channel_id) throw new Error(`${ticket.public_key} has no Discord channel to refresh.`)
+
+    // Several API calls follow; Discord's three-second window does not.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+    const channel = await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null)
+    if (!channel) throw new Error(`${ticket.public_key}'s channel no longer exists. It will be rebuilt on the next poll if the ticket is open.`)
+    await this.refreshVisibility(channel, ticket)
+    return interaction.editReply({ content: `${ticket.public_key} redrawn: category, permissions, header and controls.`, allowedMentions: ALLOWED_MENTIONS })
+  }
+
   async failInteraction(interaction, error) {
     this.logger.error('Discord ticket interaction failed', error)
     const payload = { content: error.message || 'The ticket action failed safely. Please try again or contact an administrator.', flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS }
@@ -2084,6 +2112,8 @@ export function ticketAdminCommand() {
     .addSubcommand((subcommand) => subcommand.setName('staff-remove').setDescription('Disable a staff GM mapping')
       .addUserOption((option) => option.setName('user').setDescription('Discord staff member').setRequired(true)))
     .addSubcommand((subcommand) => subcommand.setName('staff-list').setDescription('List staff GM mappings'))
+    .addSubcommand((subcommand) => subcommand.setName('refresh').setDescription('Redraw a ticket\'s header and controls')
+      .addIntegerOption((option) => option.setName('ticket_id').setDescription('Internal ticket number; defaults to the ticket you are in').setRequired(false).setMinValue(1)))
     .addSubcommand((subcommand) => subcommand.setName('reopen').setDescription('Reopen a closed ticket')
       .addIntegerOption((option) => option.setName('ticket_id').setDescription('Internal ticket number').setRequired(true).setMinValue(1)))
     .addSubcommand((subcommand) => subcommand.setName('reassign').setDescription('Assign a ticket to rostered staff')
