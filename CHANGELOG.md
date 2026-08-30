@@ -36,6 +36,9 @@ through documented GM commands over SOAP.
   timings — so a config file silently reverted by a rebuild is visible in the log rather than
   discovered when a feature is missed.
 
+The companion bot's role configuration is two ID lists (staff and admin) rather than three fixed
+role names; see its CHANGELOG and CONFIGURATION guide.
+
 ### Requirements worth knowing before installing
 
 - On stock AzerothCore, one small core patch (shipped in `patches/`, 15 lines, no behaviour change)

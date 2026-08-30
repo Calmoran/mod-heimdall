@@ -545,14 +545,12 @@ private:
         identity.Session = nullptr;
         _heldGuids.erase(identity.Guid);
 
-        if (Player* player = session->GetPlayer())
-        {
-            // Undo the GM state so none of it reaches the character save.
-            player->SetGMVisible(true);
-            player->SetGameMaster(false);
-            player->SetGMChat(false);
-        }
-
+        // Nothing is undone before the save, because there is nothing to undo. An earlier version
+        // cleared the GM state here "so none of it reaches the character save" - checked against the
+        // core, that reason is false: _SaveCharacter persists only PLAYER_FLAGS_RESTING out of the
+        // player flags, GM chat and whisper acceptance live in m_ExtraFlags which is never written,
+        // and faction is re-derived from race on load. The login path also re-establishes all four
+        // flags on every hold, so the state cannot drift between sessions either.
         session->LogoutPlayer(true);
         delete session;
         PublishState(name, false);
