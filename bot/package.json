@@ -1,0 +1,21 @@
+{
+  "name": "heimdall-bot",
+  "version": "0.9.0",
+  "private": false,
+  "type": "module",
+  "description": "Discord ticket system for AzerothCore. Companion bot for the mod-heimdall server module.",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test",
+    "diagnose": "node src/diagnose.js",
+    "check": "node --check src/index.js && node --check src/discord.js && node --check src/repository.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "mysql2": "^3.11.3"
+  }
+}

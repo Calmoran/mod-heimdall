@@ -1,0 +1,32 @@
+[Unit]
+Description=AzerothCore Discord Tickets Bot
+Wants=network-online.target
+After=network-online.target mysql.service
+
+[Service]
+Type=exec
+User=heimdall
+Group=heimdall
+WorkingDirectory=/opt/heimdall-bot
+Environment=HEIMDALL_ENV_FILE=/etc/heimdall-bot/heimdall.env
+ExecStart=/usr/bin/node /opt/heimdall-bot/src/index.js
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/heimdall
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
