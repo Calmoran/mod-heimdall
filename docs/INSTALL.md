@@ -193,7 +193,16 @@ all of them cost someone an afternoon.
 ## 8. Upgrading
 
 1. Read the release notes and back up the `heimdall_*` tables together with the archive directory.
-2. Stop the bot.
+2. **Stop the bot cleanly** — Ctrl+C, or `systemctl stop`, not a force-kill. A clean stop releases the
+   single-instance lock immediately, so the upgraded bot starts at once. A force-kill leaves the lock
+   held by a process that no longer exists and the new one waits out a 60-second staleness window,
+   saying so.
+
+   Check nothing is left running before you start the new one. Older versions could not detect a
+   second copy of themselves, so an install that has been restarted a few times may have more than
+   one bot running without ever having said so — the symptom is every action happening twice and the
+   loser complaining about work the winner already did. On Windows,
+   `Get-CimInstance Win32_Process -Filter "Name='node.exe'"` lists them.
 3. Update both trees.
 4. Apply any module SQL the release names, in order.
 5. **On stock AzerothCore, reapply the core patch if you also updated the core.** A core update can
@@ -204,7 +213,10 @@ all of them cost someone an afternoon.
    say which.
 7. Compare your `heimdall.conf` against the new `heimdall.conf.dist` and add any new options. The
    worldserver warns about missing ones at startup and falls back to compiled defaults.
-8. Compare your `.env` against `.env.example` the same way.
+8. Compare your `.env` against `.env.example` the same way. Note that `DISCORD_BOT_ROLE_ID` is no
+   longer required: if yours names a role you created by hand rather than the managed role Discord
+   made for the application, the bot now refuses to start and names the correct id. Removing the line
+   is the recommended fix — it then finds the role itself.
 9. Start the worldserver, then the bot, and read both logs. The bot's permissions preflight runs at
    startup and names anything missing.
 10. Smoke test one Discord ticket and one in-game ticket.
