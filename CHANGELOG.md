@@ -26,9 +26,14 @@ First public release.
   rather than provisioning channels it cannot use. A second copy of the bot refuses to start
   rather than doubling every action.
 - **Private ticket channels with claim visibility**: an unclaimed ticket is visible to all rostered
-  staff; a claimed one only to its claimant and admins. A private staff thread carries the
-  controls, the player card, account notes and ticket history — nothing staff-facing can surface in
-  the player-visible channel.
+  staff; a claimed one only to its claimant and admins. In-game tickets are worked directly in the
+  staff-only channel — header, player card, account notes, controls and discussion in one place.
+  Discord-opened tickets keep a private staff thread, because the reporter shares that channel and
+  must not see staff content.
+- **Consolidated controls**: three rows — Claim / Reply / Close / a login-logout toggle that acts on
+  the identity's actual current state / Add Note; one GM-actions menu (revive, unstuck, stop
+  combat, teleport, kick last — it disconnects); Reopen and player-card utilities. Two rows of
+  headroom against Discord's five-row ceiling.
 - **A staff roster mapped to GM identities**, validated against the names the realm actually
   accepted, so a typo is refused at `/ticket staff-add` rather than failing mid-conversation.
 - **Durable delivery.** Replies, closures and GM actions ride a keyed, leased job queue: nothing is

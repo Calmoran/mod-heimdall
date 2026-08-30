@@ -7,10 +7,14 @@ Two of these surprise people, so they are first.
 
 ## The two that surprise people
 
-**A ticket's staff controls are at Discord's ceiling.** The staff thread header carries five rows of
-buttons, and five is the maximum number of component rows Discord allows on one message. There is no
-room for another button without moving an existing one into a menu. If you are wondering why a
-feature request was answered with "not without redesigning the header", this is why.
+**Staff space depends on who opened the ticket.** An in-game ticket's channel is staff-only by its
+permissions — the player has no Discord account in the room — so staff work directly in the channel:
+header, player card, controls and discussion, no thread. A Discord-opened ticket's reporter *is* in
+the channel, so everything staff-facing lives in a private thread they cannot see. Do not move staff
+discussion of a Discord ticket into its channel; the reporter reads it.
+
+The ticket header carries three rows of controls (buttons, the GM action menu, utilities) against
+Discord's ceiling of five rows per message — two rows of headroom.
 
 **AzerothCore allows one open ticket per player, not Heimdall.** A player with an open in-game ticket
 cannot file another until it is closed. This is the core's own rule, enforced in `GetTicketByPlayer`,
@@ -86,8 +90,9 @@ These are not ours to change.
 - One open in-game ticket per player.
 - Realm IDs above 255 are refused by the worldserver, so the automatic realm tag is never longer
   than `R255`.
-- A private thread has no role-based visibility. Members are added one at a time, which is why the
-  staff roster matters and why an empty roster is warned about at startup.
+- A private thread has no role-based visibility. Members are added one at a time — which is why
+  Discord-opened tickets (the only ones that still use threads) depend on the staff roster, and why
+  an empty roster is warned about at startup and on each affected ticket.
 - Discord archives a thread after a week of inactivity. Heimdall reopens one when it needs to, which
   requires the Manage Threads permission.
 

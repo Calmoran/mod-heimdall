@@ -931,3 +931,180 @@ test('the empty-roster fallback without an admin role still lands on someone', a
   assert.match(sent[0].content, /Manage Server permission/, 'the message does not say who can fix it')
   assert.deepEqual(sent[0].allowedMentions.roles, ['staff-1', 'staff-2'])
 })
+
+// ---------------------------------------------------------------------------- T30: threads only
+// where a reader exists. An in-game ticket's channel is staff-only by its overwrites, so its
+// staff content lives in the channel; a Discord ticket's reporter is in the room, so that path
+// keeps the private thread.
+
+function headerService({ source, threadId = null, staff = ['s1'] }) {
+  const sent = { channel: [], thread: [], threadCreated: 0 }
+  const ticket = {
+    id: 5, public_key: source === 'ingame' ? 'R1-5' : 'DIS-000005', source, realm_tag: 'R1',
+    status: 'open', claimant_discord_user_id: null, claimant_gm_name: null,
+    player_name: source === 'ingame' ? 'Dustpaw' : null, discord_creator_id: source === 'discord' ? '900' : null,
+  }
+  const thread = {
+    isThread: () => true, archived: false,
+    send: async (payload) => { sent.thread.push(payload); return { flags: { bitfield: 0 } } },
+    members: { add: async () => {} },
+    messages: { fetch: async () => ({ find: () => null }) },
+  }
+  const channel = {
+    send: async (payload) => { sent.channel.push(payload); return {} },
+    messages: { fetch: async () => ({ find: () => null }) },
+    threads: { create: async () => { sent.threadCreated += 1; return thread } },
+  }
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-staff'] }
+  service.client = { user: { id: 'bot-user' }, channels: { fetch: async () => thread } }
+  service.repository = {
+    getThreadId: async () => threadId,
+    setThreadId: async () => {},
+    activeStaffIds: async () => staff,
+    getSetting: async () => null,
+    playerContext: async () => null,
+    accountTicketHistory: async () => null,
+    playerNotes: async () => [],
+    ticketIntake: async () => null,
+  }
+  service.ticketAccountId = async () => null
+  return { service, sent, ticket, channel }
+}
+
+test('an in-game ticket creates no thread and carries header plus controls in its channel', async () => {
+  const { service, sent, ticket, channel } = headerService({ source: 'ingame' })
+  const surface = await service.postTicketHeader(channel, ticket, 'hey my quest is stuck')
+
+  assert.equal(surface, channel, 'the staff surface for an in-game ticket is the channel itself')
+  assert.equal(sent.threadCreated, 0, 'a private thread was created for a channel with no player in it')
+  assert.equal(sent.channel.length, 1, 'expected exactly one header message')
+  assert.ok(sent.channel[0].embeds?.length, 'the header embed is missing')
+  assert.equal(sent.channel[0].components.length, 3, 'the consolidated controls should be three rows')
+})
+
+test('a Discord ticket still gets its private thread and a player-safe channel header', async () => {
+  const { service, sent, ticket, channel } = headerService({ source: 'discord' })
+  const surface = await service.postTicketHeader(channel, ticket, 'my account is broken')
+
+  assert.notEqual(surface, channel, 'the reporter is in this channel; staff content must not be')
+  assert.equal(sent.threadCreated, 1)
+  // The channel header carries no components and no staff content - the reporter can read it.
+  assert.equal(sent.channel.length, 1)
+  assert.equal(sent.channel[0].components, undefined, 'controls leaked into the reporter-visible channel')
+  // The staff header, with the controls, went to the thread.
+  const staffHeader = sent.thread.find((payload) => payload.components?.length)
+  assert.ok(staffHeader, 'the staff header never reached the thread')
+  assert.equal(staffHeader.components.length, 3)
+})
+
+test('an in-game ticket that already has a thread keeps it - controls never exist in two places', async () => {
+  const { service, sent, ticket, channel } = headerService({ source: 'ingame', threadId: 'legacy-thread' })
+  const surface = await service.postTicketHeader(channel, ticket, 'old ticket')
+
+  assert.notEqual(surface, channel, 'a legacy threaded ticket must keep its thread until it closes')
+  const controlsInChannel = sent.channel.filter((payload) => payload.components?.length)
+  assert.equal(controlsInChannel.length, 0, 'controls appeared in the channel while the thread still holds them')
+})
+
+test('the transcript captures staff messages on both surfaces', async () => {
+  const recorded = []
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.config = { retentionDays: 180 }
+  service.repository = {
+    getTicketByChannel: async (id) => (id === 'chan-9' ? { id: 9, public_key: 'R1-9' } : null),
+    recordMessage: async (row) => { recorded.push(row); return 'key' },
+  }
+  service.actorKindFor = async () => 'staff'
+  service.archive = { save: async () => ({}) }
+
+  // In-game shape: the staff message is in the ticket channel itself.
+  await service.archiveDiscordMessage({
+    guildId: 'g', channelId: 'chan-9', channel: { isThread: () => false },
+    author: { id: '100', bot: false }, content: 'note in channel', attachments: new Map(),
+  })
+  // Discord shape: the staff message is in the private thread, matched via its parent.
+  await service.archiveDiscordMessage({
+    guildId: 'g', channelId: 'thread-9', channel: { isThread: () => true, parentId: 'chan-9' },
+    author: { id: '100', bot: false }, content: 'note in thread', attachments: new Map(),
+  })
+
+  assert.deepEqual(recorded.map((row) => row.body), ['note in channel', 'note in thread'])
+  assert.ok(recorded.every((row) => row.ticketId === 9))
+})
+
+test('the GM menu drives the same commands the buttons did, and kick is last', async () => {
+  const ran = []
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = { getTicket: async () => ({ id: 5, public_key: 'R1-5', source: 'ingame', player_name: 'Dustpaw' }) }
+  service.runGmAction = async (interaction, ticket, key) => { ran.push(key) }
+  service.requireRosteredStaff = async () => ({ gm_name: 'Helpbot' })
+  service.requireTicketOwner = () => {}
+
+  for (const key of ['revive', 'unstuck', 'combatstop', 'kick']) {
+    await service.handleSelect({ customId: 'ticket:gm-menu:5', values: [key] })
+  }
+  assert.deepEqual(ran, ['revive', 'unstuck', 'combatstop', 'kick'])
+
+  // Teleport still asks for its destination before acting.
+  let modal = null
+  await service.handleSelect({ customId: 'ticket:gm-menu:5', values: ['teleport'], showModal: (m) => { modal = m } })
+  assert.ok(modal, 'teleport ran without asking for a destination')
+  assert.equal(ran.length, 4, 'teleport executed before its destination was known')
+
+  // And the rendered menu puts kick last, because it disconnects the player.
+  const rows = await (async () => {
+    const svc = Object.create(HeimdallService.prototype)
+    svc.identityState = async () => 'offline'
+    return svc.controls({ id: 5, source: 'ingame', player_name: 'Dustpaw', claimant_discord_user_id: null, realm_tag: 'R1' })
+  })()
+  const menu = rows[1].components[0].toJSON()
+  assert.equal(menu.options.at(-1).value, 'kick')
+  assert.equal(menu.options.length, 5)
+})
+
+test('the identity toggle acts on re-read state, not the label it was rendered from', async () => {
+  // The stale case: the header was rendered when the identity was HELD, so the button says
+  // "Log Out Of Game" - but the GM has since logged out from another ticket. Acting on the label
+  // would log out an identity that is already out; acting on re-read state logs it back in.
+  const calls = []
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-staff'] }
+  service.repository = {
+    getTicket: async () => TOGGLE_TICKET,
+    staff: async () => ({ gm_name: 'Helpbot' }),
+    getSetting: async () => 'offline', // what is true NOW
+  }
+  service.setIdentityHeld = async (name, held) => { calls.push(held) }
+  service.refreshTicketHeader = async () => {}
+
+  const TOGGLE_TICKET = { id: 7, public_key: 'R1-7', source: 'ingame', realm_tag: 'R1', claimant_discord_user_id: '100', claimant_gm_name: 'Helpbot' }
+  const interaction = {
+    customId: 'ticket:identity-toggle:7',
+    user: { id: '100' },
+    member: { roles: { cache: new Map([['role-staff', {}]]) } },
+    channel: null,
+    reply: async () => {},
+  }
+  // Route through handleButton the way Discord would.
+  const [, action] = interaction.customId.split(':')
+  assert.equal(action, 'identity-toggle')
+  await service.handleButton(interaction).catch((error) => { throw error })
+
+  assert.deepEqual(calls, [true], 'the toggle obeyed its stale label instead of the actual state')
+})
+
+test('an empty roster on an in-game ticket warns in the channel, since there is no thread to join', async () => {
+  const { service, sent, ticket, channel } = headerService({ source: 'ingame', staff: [] })
+  await service.postTicketHeader(channel, ticket, 'help')
+
+  const notice = sent.channel.find((payload) => payload.content?.includes('staff roster'))
+  assert.ok(notice, 'nobody was told the roster is empty')
+  assert.match(notice.content, /<@&role-admin>/)
+  assert.match(notice.content, /nobody can claim/)
+  assert.equal(sent.threadCreated, 0)
+})

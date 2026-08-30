@@ -15,14 +15,17 @@ Requires: AzerothCore, MySQL, Node.js 20 or later, and a Discord bot you control
 - Discord users press one button on the panel and pick Support, Bug Report, or
   Player Report from a menu. Each gets one private `DIS-` ticket channel.
 - An in-game ticket produces a staff-only channel keyed by the realm's tag, such
-  as `R1-42`; the player does not need a Discord account.
+  as `R1-42`; the player does not need a Discord account. Staff work directly in
+  that channel — header, player card, GM controls and discussion — because no
+  player can read it.
 - Before claim, every configured staff and admin role can see a ticket; roles
   are IDs in two lists, named whatever your server names them, with as many
   tiers as you have.
 - After claim, only the claimant, the admin roles, the ticket creator when
   applicable, and the bot can see it. Admins can also reassign, reopen, and act
   on tickets claimed by someone else; staff work their own.
-- Staff work in a private thread on each ticket. Only the explicit **Reply to
+- On a Discord-opened ticket the reporter shares the channel, so staff work in
+  a private thread they cannot see. Either way, only the explicit **Reply to
   Player** control queues a player-facing message.
 
 Read [docs/INSTALL.md](docs/INSTALL.md) before running it, and

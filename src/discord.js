@@ -618,42 +618,55 @@ export class HeimdallService {
     return channel
   }
 
-  controls(ticket) {
-    const first = new ActionRowBuilder().addComponents(
+  // Three rows, down from Discord's five-row ceiling. The GM actions moved from five buttons into
+  // one menu, login/logout collapsed into a toggle, and Request Closure was removed outright - the
+  // two rows bought back are the headroom the interface pass will spend.
+  //
+  // Async because the identity toggle's label reflects the published identity state. The label is
+  // only a hint: the handler re-reads the state when pressed and acts on what is true then, so a
+  // stale header cannot make the button do the opposite of what it says.
+  async controls(ticket) {
+    const ingame = ticket.source === 'ingame'
+    const claimed = Boolean(ticket.claimant_discord_user_id)
+    const held = ingame && claimed && ticket.claimant_gm_name
+      ? (await this.identityState(ticket.realm_tag, ticket.claimant_gm_name)) === 'held'
+      : false
+
+    const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`ticket:claim:${ticket.id}`).setLabel('Claim').setStyle(ButtonStyle.Success),
       // Disabled while unclaimed: replying requires an assigned GM, and finding that out only
       // after typing a whole message is a poor way to learn it.
       new ButtonBuilder().setCustomId(`ticket:reply:${ticket.id}`).setLabel('Reply to Player').setStyle(ButtonStyle.Primary)
-        .setDisabled(ticket.source !== 'ingame' || !ticket.claimant_discord_user_id),
+        .setDisabled(!ingame || !claimed),
+      new ButtonBuilder().setCustomId(`ticket:close:${ticket.id}`).setLabel('Close').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId(`ticket:identity-toggle:${ticket.id}`)
+        .setLabel(held ? 'Log Out Of Game' : 'Log In To Game')
+        .setStyle(held ? ButtonStyle.Secondary : ButtonStyle.Success)
+        .setDisabled(!ingame || !claimed),
       new ButtonBuilder().setCustomId(`ticket:note:${ticket.id}`).setLabel('Add Note').setStyle(ButtonStyle.Secondary),
     )
-    const second = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`ticket:request-close:${ticket.id}`).setLabel('Request Closure').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId(`ticket:close:${ticket.id}`).setLabel('Close').setStyle(ButtonStyle.Danger),
+
+    // Kick is deliberately last: it disconnects the player, and the menu order is the reading
+    // order. Explicit list rather than Object.entries, so the object's layout cannot reorder it.
+    const actions = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(`ticket:gm-menu:${ticket.id}`)
+        .setPlaceholder('GM actions…')
+        .setDisabled(!ingame || !ticket.player_name)
+        .addOptions(['revive', 'unstuck', 'combatstop', 'teleport', 'kick'].map((key) => ({
+          label: GM_ACTIONS[key].label,
+          value: key,
+          description: key === 'kick' ? 'Disconnects the player from the realm.' : undefined,
+        }))),
+    )
+
+    const utility = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`ticket:reopen:${ticket.id}`).setLabel('Reopen').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`ticket:refresh-context:${ticket.id}`).setLabel('Refresh Player Info').setStyle(ButtonStyle.Secondary).setDisabled(!ingame),
+      new ButtonBuilder().setCustomId(`ticket:remove-note:${ticket.id}`).setLabel('Remove Note').setStyle(ButtonStyle.Secondary).setDisabled(!ingame),
     )
-    const third = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`ticket:identity-login:${ticket.id}`).setLabel('Log In To Game').setStyle(ButtonStyle.Success).setDisabled(ticket.source !== 'ingame'),
-      new ButtonBuilder().setCustomId(`ticket:identity-logout:${ticket.id}`).setLabel('Log Out Of Game').setStyle(ButtonStyle.Secondary).setDisabled(ticket.source !== 'ingame'),
-    )
-    // Player-card controls. In-game only: a Discord-native ticket has no character behind it,
-    // so there is nothing to refresh and no account to hang a note on.
-    const fourth = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`ticket:refresh-context:${ticket.id}`).setLabel('Refresh Player Info').setStyle(ButtonStyle.Secondary).setDisabled(ticket.source !== 'ingame'),
-      new ButtonBuilder().setCustomId(`ticket:remove-note:${ticket.id}`).setLabel('Remove Note').setStyle(ButtonStyle.Secondary).setDisabled(ticket.source !== 'ingame'),
-    )
-    // Acting on the player, from the thread rather than an alt-tab. In-game only, and every one of
-    // these needs a character to act on.
-    const fifth = new ActionRowBuilder().addComponents(
-      ...Object.entries(GM_ACTIONS).map(([key, action]) => new ButtonBuilder()
-        .setCustomId(`ticket:gm-${key}:${ticket.id}`)
-        .setLabel(action.label)
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(ticket.source !== 'ingame' || !ticket.player_name)),
-    )
-    // Five rows is Discord's ceiling for one message. There is no room for a sixth without moving
-    // something into a menu.
-    return [first, second, third, fourth, fifth]
+
+    return [buttons, actions, utility]
   }
 
   // One pinned message that answers "what is waiting, and for how long" without opening anything.
@@ -759,6 +772,28 @@ export class HeimdallService {
 
   staffThreadName(ticket) {
     return `staff-${ticket.public_key}`.slice(0, 90)
+  }
+
+  // Where staff content for this ticket lives. An in-game ticket has no Discord creator, so its
+  // channel is already staff-only - @everyone denied, only the bot, admin roles, and staff roles
+  // or the claimant allowed (overwrites() is the single authority on that, verified). A private
+  // thread there was protecting content from a reader who is not in the room, at the cost of the
+  // whole add-members-one-at-a-time family of failures. A Discord-originated ticket's reporter
+  // really is in the channel, so that path keeps its private thread.
+  //
+  // Tickets that already have a thread keep it until they close, whatever their source - the one
+  // thing migration must never produce is controls in two places.
+  async staffSurface(channel, ticket) {
+    if (ticket.source === 'discord') return this.ensureStaffThread(channel, ticket)
+    const legacyThreadId = await this.repository.getThreadId(ticket.id)
+    if (legacyThreadId) {
+      const thread = await this.client.channels.fetch(legacyThreadId).catch(() => null)
+      if (thread) {
+        if (thread.archived) await thread.setArchived(false, 'Ticket still needs staff attention').catch(() => null)
+        return thread
+      }
+    }
+    return channel
   }
 
   async ensureStaffThread(channel, ticket) {
@@ -999,42 +1034,86 @@ export class HeimdallService {
   }
 
   async postTicketHeader(channel, ticket, description = '') {
+    const surface = await this.staffSurface(channel, ticket)
+
+    // New-shape in-game ticket: one header, in the channel, carrying the context card and the
+    // controls. There is no player in the room to hide anything from and no second surface to
+    // drift out of step.
+    if (surface === channel) {
+      if (!await this.findHeaderMessage(channel, ticket)) {
+        await channel.send({
+          embeds: [await this.headerEmbed(ticket, description)],
+          components: await this.controls(ticket),
+          allowedMentions: ALLOWED_MENTIONS,
+        })
+        await this.warnChannelIfRosterEmpty(channel, ticket)
+      }
+      return channel
+    }
+
+    // Discord-originated (and legacy threaded) tickets: the reporter can read the channel, so the
+    // channel gets the player-safe header and everything staff-facing stays in the private thread.
     if (!await this.findHeaderMessage(channel, ticket)) {
       await channel.send({ embeds: [this.playerHeaderEmbed(ticket, description)], allowedMentions: ALLOWED_MENTIONS })
     }
-
-    const thread = await this.ensureStaffThread(channel, ticket)
-    if (!await this.findHeaderMessage(thread, ticket)) {
-      await thread.send({
+    if (!await this.findHeaderMessage(surface, ticket)) {
+      await surface.send({
         embeds: [await this.headerEmbed(ticket, description)],
-        components: this.controls(ticket),
+        components: await this.controls(ticket),
         allowedMentions: ALLOWED_MENTIONS,
       })
     }
-    return thread
+    return surface
+  }
+
+  // The in-game replacement for the thread-membership fallback. With no thread there is nothing to
+  // join - the channel is visible to every staff role by its overwrites - so an empty roster is an
+  // attention problem now, not an access problem. The mention is attention, nothing more.
+  async warnChannelIfRosterEmpty(channel, ticket) {
+    const staffIds = await this.repository.activeStaffIds()
+    if (staffIds.length) return
+    const roles = this.escalationRoleIds()
+    const instruction = this.config.adminRoleIds.length
+      ? 'Run `/ticket staff-add` to roster the staff who should be handling tickets.'
+      : 'Someone with the Manage Server permission must run `/ticket staff-add` to roster the staff who should be handling tickets.'
+    await channel.send({
+      content: `${this.roleMentions(roles)} Nobody is on the Heimdall staff roster, so nobody can claim `
+        + `or answer this ticket. ${instruction}`,
+      allowedMentions: { parse: [], roles, repliedUser: false },
+    })
   }
 
   // Keeps both headers honest after any state change. The staff panel carries the controls and
   // the in-game identity status; the player header carries only status.
   async refreshTicketHeader(channel, ticket) {
+    const closedOff = ticket.status === 'closed' || ticket.status === 'cancelled'
+    // Resolution only when the ticket is closed: a refresh must not conjure a thread for a ticket
+    // that is on its way out.
+    const surface = ticket.source === 'discord' && closedOff
+      ? await this.staffThread(channel, ticket)
+      : await this.staffSurface(channel, ticket)
+
+    if (surface === channel) {
+      // New-shape in-game: the channel header IS the control surface, so it keeps its components.
+      const header = await this.findHeaderMessage(channel, ticket)
+      if (!header) return
+      const description = header.embeds[0]?.description ?? ''
+      const body = description.split('\n\n').slice(1).join('\n\n')
+      await header.edit({ embeds: [await this.headerEmbed(ticket, body)], components: await this.controls(ticket) })
+      return
+    }
+
     const playerHeader = await this.findHeaderMessage(channel, ticket)
     if (playerHeader) {
       const description = playerHeader.embeds[0]?.description ?? ''
       await playerHeader.edit({ embeds: [this.playerHeaderEmbed(ticket, description)], components: [] })
     }
-
-    // Tickets created before staff threads existed have their controls in the channel. Creating
-    // the thread here migrates them on their next state change, instead of stripping the controls
-    // from the channel and leaving staff with nowhere to click. Closed tickets are not migrated -
-    // their channel is scheduled for deletion anyway.
-    const closedOff = ticket.status === 'closed' || ticket.status === 'cancelled'
-    const thread = closedOff ? await this.staffThread(channel, ticket) : await this.ensureStaffThread(channel, ticket)
-    if (!thread) return
-    const staffHeader = await this.findHeaderMessage(thread, ticket)
+    if (!surface) return
+    const staffHeader = await this.findHeaderMessage(surface, ticket)
     if (!staffHeader) return
     const description = staffHeader.embeds[0]?.description ?? ''
     const body = description.split('\n\n').slice(1).join('\n\n')
-    await staffHeader.edit({ embeds: [await this.headerEmbed(ticket, body)], components: this.controls(ticket) })
+    await staffHeader.edit({ embeds: [await this.headerEmbed(ticket, body)], components: await this.controls(ticket) })
   }
 
   // The controls live in the thread, so an interaction usually arrives from inside it. Falling
@@ -1045,7 +1124,7 @@ export class HeimdallService {
       return interaction.channel
     }
     const parent = interaction.channel ?? await this.client.channels.fetch(ticket.discord_channel_id)
-    return this.ensureStaffThread(parent, ticket)
+    return this.staffSurface(parent, ticket)
   }
 
   ticketChannelFrom(interaction) {
@@ -1210,22 +1289,9 @@ export class HeimdallService {
       return interaction.showModal(this.modal(`ticket:close-submit:${ticket.id}`, 'Close Ticket', 'Closure note'))
     }
     if (action === 'request-close') {
-      await this.requireRosteredStaff(interaction)
-      await this.repository.recordMessage({ ticketId: ticket.id, actorKind: 'staff', actorRef: interaction.user.id, body: 'Closure requested.', idempotencyKey: interaction.id })
-
-      // Somebody other than the clicker has to be able to see this, or the button is theatre.
-      const audience = ticket.claimant_discord_user_id
-        ? `<@${ticket.claimant_discord_user_id}>`
-        : this.roleMentions(this.escalationRoleIds())
-      const mentions = ticket.claimant_discord_user_id
-        ? { users: [ticket.claimant_discord_user_id], roles: [], repliedUser: false }
-        : { users: [], roles: this.escalationRoleIds(), repliedUser: false }
-      const closureThread = await this.staffThreadFor(interaction, ticket)
-      await closureThread.send({
-        content: `${audience} — <@${interaction.user.id}> has requested that this ticket be closed.`,
-        allowedMentions: mentions,
-      })
-      return interaction.reply({ content: 'Closure request recorded for staff review.', flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS })
+      // Removed by operator decision; headers rendered before the removal still carry the button
+      // until their next refresh, so the press gets an answer rather than "unknown action".
+      throw new Error('Closure requests were removed. The claimant or an administrator can close this ticket directly.')
     }
     if (action === 'refresh-context') {
       await this.requireRosteredStaff(interaction)
@@ -1245,13 +1311,19 @@ export class HeimdallService {
         allowedMentions: ALLOWED_MENTIONS,
       })
     }
-    if (action === 'identity-login' || action === 'identity-logout') {
+    if (action === 'identity-toggle' || action === 'identity-login' || action === 'identity-logout') {
       const staff = await this.requireRosteredStaff(interaction)
       if (ticket.source !== 'ingame') throw new Error('This ticket has no in-game side.')
       if (!this.isAdmin(interaction) && ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only an administrator or the assigned staff member can control the in-game identity.')
 
       const gmName = ticket.claimant_gm_name ?? staff.gm_name
-      const held = action === 'identity-login'
+      // The toggle acts on what is true NOW, never on the state its label was rendered from - a
+      // header that sat unrefreshed would otherwise make the button do the opposite of what it
+      // says. The legacy login/logout buttons (still live on pre-toggle headers) keep their
+      // explicit, idempotent semantics.
+      const held = action === 'identity-toggle'
+        ? (await this.identityState(ticket.realm_tag, gmName)) !== 'held'
+        : action === 'identity-login'
       await this.setIdentityHeld(gmName, held, interaction.user.id)
       await this.refreshTicketHeader(interaction.channel, ticket)
 
@@ -1354,6 +1426,21 @@ export class HeimdallService {
       const [category] = interaction.values
       if (!TICKET_CATEGORIES[category]) throw new Error('Unknown ticket category.')
       return interaction.showModal(this.intakeModal(category))
+    }
+    if (action === 'gm-menu') {
+      const ticket = await this.repository.getTicket(ticketIdFrom(interaction.customId))
+      if (!ticket) throw new Error('That ticket no longer exists.')
+      const [key] = interaction.values
+      if (!GM_ACTIONS[key]) throw new Error('Unknown action.')
+      // The menu drives the same command path the buttons did - teleport still asks for its
+      // destination first, everything else runs directly.
+      if (GM_ACTIONS[key].needsDestination) {
+        await this.requireRosteredStaff(interaction)
+        this.requireTicketOwner(interaction, ticket)
+        return interaction.showModal(this.modal(`ticket:gm-teleport-submit:${ticket.id}`, 'Teleport Player',
+          'Destination', 'A name from the realm’s teleport list, or $home'))
+      }
+      return this.runGmAction(interaction, ticket, key)
     }
   }
 
