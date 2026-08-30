@@ -146,6 +146,10 @@ export class HeimdallService {
   // Hence a refusal rather than a warning, and hence the id being optional: the bot can find its own
   // managed role, so the safest configuration is not to set this at all.
   async verifyBotRole() {
+    // botRoleFor reads the role cache rather than fetching, so this must not depend on an earlier
+    // caller having filled it. Fetching again is cheap and idempotent, and it means reordering
+    // initialize() cannot quietly turn this check into "no managed role found".
+    await this.guild.roles.fetch()
     const me = await this.guild.members.fetchMe()
     const managed = this.guild.roles.botRoleFor(this.client.user)
       ?? me.roles.cache.find((role) => role.managed)

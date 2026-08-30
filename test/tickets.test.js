@@ -586,7 +586,7 @@ function botRoleService(configuredId, memberOf = []) {
   service.guild = {
     name: 'Test Guild',
     members: { fetchMe: async () => ({ roles: { cache: new Map(memberOf.map((id) => [id, { id, managed: id === 'managed-role' }])) } }) },
-    roles: { botRoleFor: () => ({ id: 'managed-role', name: 'Heimdall' }) },
+    roles: { fetch: async () => {}, botRoleFor: () => ({ id: 'managed-role', name: 'Heimdall' }) },
   }
   return { service, logged }
 }
