@@ -255,13 +255,50 @@ export function safeChannelName(publicKey, label = '') {
   return `${publicKey.toLowerCase()}${suffix ? `-${suffix}` : ''}`.slice(0, 90)
 }
 
+// Cuts a word too long to fit any whisper into pieces that do fit. Iterating characters rather than
+// bytes is what keeps the pieces valid: slicing a UTF-8 buffer at a byte offset can land in the
+// middle of an accented or CJK character and the client renders the halves as garbage. `for...of`
+// walks code points, so surrogate pairs stay together too.
+function splitLongToken(token, maxBytes) {
+  const pieces = []
+  let piece = ''
+  let bytes = 0
+  for (const character of token) {
+    const size = Buffer.byteLength(character, 'utf8')
+    // Only reachable below maxBytes 4, which the caller's own bounds already exclude.
+    if (size > maxBytes) throw new Error(`A single character does not fit in ${maxBytes} bytes`)
+    if (bytes + size > maxBytes) {
+      pieces.push(piece)
+      piece = ''
+      bytes = 0
+    }
+    piece += character
+    bytes += size
+  }
+  if (piece) pieces.push(piece)
+  return pieces
+}
+
 export function splitWowMessage(input, maxBytes = 240) {
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 255) throw new Error('maxBytes must be between 1 and 255')
   const words = String(input).replace(/\r/g, '').split(/\n+/).flatMap((line) => line.split(/\s+/)).filter(Boolean)
   const chunks = []
   let chunk = ''
   for (const word of words) {
-    if (Buffer.byteLength(word, 'utf8') > maxBytes) throw new Error('A single word exceeds the WoW message limit')
+    // A word longer than a whole whisper used to throw, which rejected the entire reply - the
+    // player received nothing and the GM was told the rule with no way to satisfy it. The realistic
+    // trigger is a pasted URL with query parameters, and chopping a URL by hand does not leave a
+    // working link, so there was no workaround. Splitting mid-word is ugly; delivering nothing is
+    // worse. Throwing is kept for input that genuinely cannot be sent.
+    if (Buffer.byteLength(word, 'utf8') > maxBytes) {
+      const pieces = splitLongToken(word, maxBytes)
+      if (chunk) chunks.push(chunk)
+      // All but the last piece are full; the last becomes the running chunk so the words that
+      // follow can still share a whisper with it.
+      chunks.push(...pieces.slice(0, -1))
+      chunk = pieces[pieces.length - 1]
+      continue
+    }
     const candidate = chunk ? `${chunk} ${word}` : word
     if (Buffer.byteLength(candidate, 'utf8') <= maxBytes) {
       chunk = candidate

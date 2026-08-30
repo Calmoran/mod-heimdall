@@ -45,6 +45,13 @@ async function cleanupExpired(repository, archive, logger) {
 // a takeover is far outside anything a GC pause, a slow query or a stalled connection produces, and
 // it means a crashed bot blocks a restart for at most a minute - shorter than it takes an operator
 // to notice the crash in the first place.
+//
+// Since the lock is held per process rather than per configuration, a HARD-killed bot leaves the
+// row owned by a run id that no longer exists, and a restart inside this window is refused with a
+// message that says how long to wait. That is the accepted cost. A clean stop (SIGINT/SIGTERM)
+// releases the lock, so Ctrl+C and restart stays instant; only taskkill /F or a crash waits. Do
+// not shorten the window to paper over it - 60s is what lets a crashed bot recover without
+// somebody editing the settings table by hand.
 const INSTANCE_HEARTBEAT_SECONDS = 15
 const INSTANCE_STALE_SECONDS = 60
 
@@ -57,16 +64,19 @@ async function main() {
     ...config.log,
     secrets: [config.token, config.mysql.password, config.soap.password],
   })
-  logger.info('Heimdall bot starting', { level: config.log.level, logFile: logger.path })
+  // The run id and pid are logged because "am I running twice?" has to be answerable from the log
+  // alone. Without them a log holding nine "Heimdall bot starting" lines says nothing about which
+  // process wrote any of the lines after them.
+  logger.info('Heimdall bot starting', { level: config.log.level, logFile: logger.path, runId: config.runId, pid: process.pid })
   const pool = mysql.createPool({ ...config.mysql, waitForConnections: true, connectionLimit: 5, queueLimit: 20, enableKeepAlive: true })
-  const repository = new TicketRepository(pool, config.instanceId)
+  const repository = new TicketRepository(pool, config.runId, config.instanceId)
   // Before the Discord login, so a second instance never reaches the gateway and never sees an
   // interaction it would answer twice.
   const lock = await repository.claimInstanceLock(INSTANCE_STALE_SECONDS)
   if (!lock.held) {
     throw new Error(`Another ticket bot instance is already running: "${lock.holder}", last seen ${lock.age}s ago. `
       + `Stop it first, or wait ${INSTANCE_STALE_SECONDS}s after it dies for the lock to expire. `
-      + `This instance is "${repository.instanceId}"; set BOT_INSTANCE_ID to tell them apart.`)
+      + `This process is "${config.runId}".`)
   }
 
   const archive = new ArchiveStore(config.archiveDir, config.maxAttachmentBytes)

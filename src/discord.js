@@ -89,6 +89,14 @@ function ticketIdFrom(customId) {
 // Collection#keys() is an Iterator, not an Array. Callers that only build a Set from this were
 // fine, but anything calling Array methods on it (isAdmin uses .includes) threw at runtime.
 // Spread it once here so every caller gets a real array.
+// Discord reports a parent that no longer exists as a form-body error on parent_id, not as a
+// missing-channel error, so the numeric code alone does not identify it.
+function isMissingCategoryError(error) {
+  if (Number(error?.code) !== 50035) return false
+  const detail = `${error?.message ?? ''}${JSON.stringify(error?.rawError ?? '')}`
+  return detail.includes('CHANNEL_PARENT_INVALID') || detail.includes('parent_id')
+}
+
 function actorRoles(interaction) {
   return [...(interaction.member?.roles?.cache?.keys?.() ?? [])]
 }
@@ -200,24 +208,28 @@ export class HeimdallService {
     this.ids = {
       openCategoryId: await this.resolveGuildChannel({
         configured: this.config.openCategoryId,
+        envVar: 'DISCORD_OPEN_CATEGORY_ID',
         settingKey: 'discord.open_category_id',
         describe: 'open tickets category',
         create: () => this.guild.channels.create({ name: 'Open Tickets', type: ChannelType.GuildCategory, reason: 'mod-heimdall first run' }),
       }),
       claimedCategoryId: await this.resolveGuildChannel({
         configured: this.config.claimedCategoryId,
+        envVar: 'DISCORD_CLAIMED_CATEGORY_ID',
         settingKey: 'discord.claimed_category_id',
         describe: 'claimed tickets category',
         create: () => this.guild.channels.create({ name: 'Claimed Tickets', type: ChannelType.GuildCategory, reason: 'mod-heimdall first run' }),
       }),
       closedCategoryId: await this.resolveGuildChannel({
-        configured: null,
+        configured: this.config.closedCategoryId,
+        envVar: 'DISCORD_CLOSED_CATEGORY_ID',
         settingKey: 'discord.closed_category_id',
         describe: 'closed tickets category',
         create: () => this.guild.channels.create({ name: 'Closed Tickets', type: ChannelType.GuildCategory, reason: 'mod-heimdall first run' }),
       }),
       panelChannelId: await this.resolveGuildChannel({
         configured: this.config.panelChannelId,
+        envVar: 'DISCORD_PANEL_CHANNEL_ID',
         settingKey: 'discord.panel_channel_id',
         describe: 'ticket panel channel',
         create: () => this.guild.channels.create({ name: 'open-a-ticket', type: ChannelType.GuildText, reason: 'mod-heimdall first run' }),
@@ -249,9 +261,42 @@ export class HeimdallService {
     }
   }
 
-  async resolveGuildChannel({ configured, settingKey, describe, create }) {
-    // An explicitly configured real ID always wins and is never overwritten.
-    if (configured) return configured
+  // Operators reorganise their Discord while the bot is running, so a category disappearing under
+  // it is ordinary behaviour rather than abuse. resolveGuildChannel already recreates a vanished
+  // category, but it only ran at startup: the ids cached in this.ids stayed stale, and every
+  // delivery failed with a raw API stack trace until somebody restarted the bot. Nothing was lost -
+  // the jobs retried with backoff - but the log said only "Category does not exist", naming neither
+  // the cause nor the remedy.
+  //
+  // The action is re-run rather than resumed, so it has to read this.ids inside the callback for
+  // the retry to pick up the replacement id.
+  async withFreshCategories(describe, action) {
+    try {
+      return await action()
+    } catch (error) {
+      if (!isMissingCategoryError(error)) throw error
+      this.logger.warn(`${describe} failed because a ticket category no longer exists in Discord. `
+        + 'Recreating the ticket categories and retrying once. Nothing is lost either way: deliveries '
+        + 'retry with backoff.')
+      await this.provisionGuildLayout()
+      await this.secureCategories()
+      return action()
+    }
+  }
+
+  async resolveGuildChannel({ configured, settingKey, describe, create, envVar }) {
+    // An explicitly configured real ID always wins and is never overwritten. It is checked rather
+    // than trusted: an id pointing at something deleted cannot be recovered from automatically the
+    // way a stored one can, because .env would still name the dead channel and a replacement would
+    // be created on every restart. Refusing at startup is the only honest option, and it matches
+    // how verifyConfiguredRoles already treats a role id that resolves to nothing.
+    if (configured) {
+      const existing = await this.client.channels.fetch(configured).catch(() => null)
+      if (existing) return configured
+      throw new Error(`${envVar} is set to ${JSON.stringify(configured)}, which is not a channel in `
+        + `${this.guild.name}. Correct it, or remove it from .env and Heimdall will create the `
+        + `${describe} itself and remember it.`)
+    }
 
     const stored = await this.repository.getSetting(settingKey)
     if (stored) {
@@ -384,14 +429,14 @@ export class HeimdallService {
 
   async createTicketChannel(ticket, label) {
     await this.cacheOverwriteTargets(ticket)
-    const channel = await this.guild.channels.create({
+    const channel = await this.withFreshCategories(`Creating a channel for ${ticket.public_key}`, () => this.guild.channels.create({
       name: safeChannelName(ticket.public_key, label),
       type: ChannelType.GuildText,
       parent: this.ids.openCategoryId,
       topic: `mod-heimdall:${ticket.public_key}`,
       permissionOverwrites: this.overwrites(ticket),
       reason: `Ticket ${ticket.public_key} created`,
-    })
+    }))
     await this.repository.setChannel(ticket.id, channel.id)
     return channel
   }
@@ -592,9 +637,36 @@ export class HeimdallService {
   // controls have to be reachable by whoever picks it up.
   async addStaffToThread(thread, ids = null) {
     const staffIds = ids ?? await this.repository.activeStaffIds()
+    let added = 0
     for (const id of staffIds) {
-      await thread.members.add(id).catch((error) => this.logger.warn(`Could not add ${id} to ${thread.name}: ${error.message}`))
+      const ok = await thread.members.add(id).then(() => true).catch((error) => {
+        this.logger.warn(`Could not add ${id} to ${thread.name}: ${error.message}`)
+        return false
+      })
+      if (ok) added += 1
     }
+    return added
+  }
+
+  // Staff rostered after a ticket opened are not in that ticket's thread, and a private thread has
+  // no role-based visibility to fall back on - so without this they are invisible in every ticket
+  // already running until somebody opens a new one.
+  //
+  // Thread ids live in the settings table rather than a column (the schema is frozen), so there is
+  // no query that returns "open tickets with threads". Walking the open tickets and asking for each
+  // one's thread is the shape the data actually has.
+  async addStaffToOpenThreads(discordUserId) {
+    let joined = 0
+    for (const ticket of await this.repository.ticketsWithOpenWork()) {
+      const threadId = await this.repository.getThreadId(ticket.id)
+      if (!threadId) continue
+      const thread = await this.client.channels.fetch(threadId).catch(() => null)
+      if (!thread) continue
+      // Discord archives a thread after a week of quiet, and an archived thread takes no members.
+      if (thread.archived) await thread.setArchived(false, 'Adding newly rostered staff').catch(() => null)
+      if (await this.addStaffToThread(thread, [discordUserId])) joined += 1
+    }
+    return joined
   }
 
 
@@ -1196,8 +1268,15 @@ export class HeimdallService {
     if (wasOffline) await this.refreshTicketHeader(interaction.channel, ticket)
 
     const note = wasOffline ? ' Your in-game identity was logged in for you.' : ''
+    // Said unconditionally, this read as a failure notice at the moment of success: the player was
+    // online and the whisper had already landed. The module publishes an online indicator for the
+    // context card; when it does not know, the cautious wording is still the right one.
+    const context = await this.repository.playerContext(ticket.id).catch(() => null)
+    const arrival = context?.online
+      ? `Delivering now — ${ticket.player_name} is online.`
+      : `It will arrive when ${ticket.player_name} is online.`
     return interaction.reply({
-      content: `Sent as ${chunks.length} in-game message${chunks.length === 1 ? '' : 's'}. It will arrive when ${ticket.player_name} is online.${note}`,
+      content: `Sent as ${chunks.length} in-game message${chunks.length === 1 ? '' : 's'}. ${arrival}${note}`,
       flags: MessageFlags.Ephemeral,
       allowedMentions: ALLOWED_MENTIONS,
     })
@@ -1336,7 +1415,8 @@ export class HeimdallService {
     // that cannot be drawn must never stop a ticket from being claimed or closed.
     this.refreshQueueBoard().catch((error) => this.logger.error('Queue board refresh failed', error))
     await this.cacheOverwriteTargets(ticket)
-    await channel.setParent(this.categoryFor(ticket), { lockPermissions: false })
+    await this.withFreshCategories(`Moving ${ticket.public_key} to its category`,
+      () => channel.setParent(this.categoryFor(ticket), { lockPermissions: false }))
     await channel.permissionOverwrites.set(this.overwrites(ticket), `Ticket ${ticket.public_key} visibility updated`)
     await this.refreshTicketHeader(channel, ticket)
   }
@@ -1421,9 +1501,34 @@ export class HeimdallService {
     if (stored) {
       const existing = await this.client.channels.fetch(stored).catch(() => null)
       if (existing) return existing
+
+      // A stored id is proof the audit was switched on at some point, so this is not the quiet
+      // never-enabled case that `create` guards - the channel was deleted out from under an
+      // accountability log, and every entry since has been dropped without a word. That is the one
+      // failure this feature must never have, so it is recreated whatever the caller asked for.
+      this.logger.warn(`The GM command audit channel (${stored}) no longer exists in Discord. `
+        + 'Every audit entry since it was deleted has been discarded, and those cannot be recovered. '
+        + 'Recreating it now.')
+      await this.warnQueueBoard('The GM command audit channel had been deleted, so audit entries were '
+        + 'being discarded. It has been recreated. Anything logged while it was missing is gone.')
+      return this.createAuditChannel()
     }
     if (!create) return null
+    return this.createAuditChannel()
+  }
 
+  // Best effort, and deliberately not fatal: this exists to put an operator-visible notice where
+  // staff already look, for a condition whose whole problem is that it is invisible.
+  async warnQueueBoard(text) {
+    try {
+      const board = await this.queueBoardChannel()
+      if (board) await board.send({ content: `⚠️ ${text}`, allowedMentions: ALLOWED_MENTIONS })
+    } catch (error) {
+      this.logger.warn(`Could not post an operator notice to the queue board: ${error.message}`)
+    }
+  }
+
+  async createAuditChannel() {
     const channel = await this.guild.channels.create({
       name: 'gm-command-audit',
       type: ChannelType.GuildText,

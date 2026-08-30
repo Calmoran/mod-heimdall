@@ -1,9 +1,13 @@
 import { eventKey, ticketPublicKey } from './domain.js'
 
 export class TicketRepository {
-  constructor(pool, instanceId) {
+  // runId identifies this PROCESS and owns both the instance lock and the delivery leases. label is
+  // BOT_INSTANCE_ID, carried only so messages can name the instance the way its operator does.
+  // They are separate because two copies of one .env share the label but must not share the lock.
+  constructor(pool, runId, label = runId) {
     this.pool = pool
-    this.instanceId = instanceId
+    this.runId = runId
+    this.instanceId = label
   }
 
   // Two bots against one database and one token double every human action and complain about
@@ -18,13 +22,13 @@ export class TicketRepository {
   async claimInstanceLock(staleSeconds) {
     await this.pool.execute(
       "INSERT IGNORE INTO heimdall_setting (setting_key, setting_value) VALUES ('discord.bot_instance', ?)",
-      [this.instanceId],
+      [this.runId],
     )
     await this.pool.execute(
       "UPDATE heimdall_setting SET setting_value = ?, updated_at = CURRENT_TIMESTAMP"
       + " WHERE setting_key = 'discord.bot_instance'"
       + "   AND (setting_value = ? OR updated_at < DATE_SUB(CURRENT_TIMESTAMP, INTERVAL ? SECOND))",
-      [this.instanceId, this.instanceId, staleSeconds],
+      [this.runId, this.runId, staleSeconds],
     )
     return this.instanceLockHolder()
   }
@@ -34,7 +38,7 @@ export class TicketRepository {
       "SELECT setting_value AS holder, TIMESTAMPDIFF(SECOND, updated_at, CURRENT_TIMESTAMP) AS age"
       + " FROM heimdall_setting WHERE setting_key = 'discord.bot_instance'",
     )
-    return { holder: row?.holder ?? null, age: Number(row?.age ?? 0), held: row?.holder === this.instanceId }
+    return { holder: row?.holder ?? null, age: Number(row?.age ?? 0), held: row?.holder === this.runId }
   }
 
   // Returns false if another instance has taken the lock, which is the signal to stop rather than
@@ -43,7 +47,7 @@ export class TicketRepository {
     await this.pool.execute(
       "UPDATE heimdall_setting SET updated_at = CURRENT_TIMESTAMP"
       + " WHERE setting_key = 'discord.bot_instance' AND setting_value = ?",
-      [this.instanceId],
+      [this.runId],
     )
     return (await this.instanceLockHolder()).held
   }
@@ -54,7 +58,7 @@ export class TicketRepository {
     await this.pool.execute(
       "UPDATE heimdall_setting SET updated_at = DATE_SUB(CURRENT_TIMESTAMP, INTERVAL 1 DAY)"
       + " WHERE setting_key = 'discord.bot_instance' AND setting_value = ?",
-      [this.instanceId],
+      [this.runId],
     )
   }
 
@@ -416,7 +420,7 @@ export class TicketRepository {
         const markers = ids.map(() => '?').join(',')
         await connection.execute(
           `UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, lease_owner = ?, leased_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ? SECOND) WHERE id IN (${markers})`,
-          [this.instanceId, leaseSeconds, ...ids],
+          [this.runId, leaseSeconds, ...ids],
         )
       }
       await connection.commit()
@@ -430,13 +434,13 @@ export class TicketRepository {
   }
 
   async delivered(id) {
-    await this.pool.execute("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, leased_until = NULL WHERE id = ? AND lease_owner = ?", [id, this.instanceId])
+    await this.pool.execute("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, leased_until = NULL WHERE id = ? AND lease_owner = ?", [id, this.runId])
   }
 
   async failed(id, error, maxAttempts) {
     await this.pool.execute(
       "UPDATE heimdall_delivery SET state = IF(attempts >= ?, 'dead', 'queued'), available_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL LEAST(900, POW(2, attempts) * 5) SECOND), leased_until = NULL, last_error = LEFT(?, 512) WHERE id = ? AND lease_owner = ?",
-      [maxAttempts, String(error?.message ?? error), id, this.instanceId],
+      [maxAttempts, String(error?.message ?? error), id, this.runId],
     )
   }
 

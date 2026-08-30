@@ -21,7 +21,7 @@ tickets, which is its own choice and is listed below.
 
 | Limit | Value | What happens at the limit | Changeable |
 |---|---|---|---|
-| In-game whisper segment | 240 bytes | Longer replies are split across several whispers on word boundaries | `Heimdall.MaxWhisperBytes`, 32–255 |
+| In-game whisper segment | 240 bytes | Longer replies are split across several whispers on word boundaries. A single word longer than the limit — a pasted URL, usually — is split mid-word rather than rejected | `Heimdall.MaxWhisperBytes`, 32–255 |
 | Stored message text | 2000 characters | Longer text is truncated before it is recorded | No |
 | Ticket description and staff notes typed into a form | 1800 characters | The form will not accept more | No |
 | Short form fields (character name, destination) | 120 characters | The form will not accept more | No |
@@ -41,9 +41,16 @@ description, 1024 per embed field, 45 for a form title or label, 100 for a form 
 | How often the bot processes its queue | every 5s | No |
 | How often the queue board redraws | every 60s, and immediately on any ticket change | No |
 | Retention sweep | hourly | No |
+| Restart after a hard kill | up to 60s | No |
 
 A queued whisper waits until the player is online and the GM identity is held. It is not lost, and
 "still queued" is not an error.
+
+Only one bot may run against a realm at a time, and the lock that enforces it is held per process.
+Stopping the bot with Ctrl+C releases it, so a normal restart is immediate. Killing it outright
+(`taskkill /F`, a crash) leaves the lock held by a process that no longer exists, and the next start
+is refused for up to a minute with a message saying how long to wait. That window is what lets a
+crashed bot recover on its own instead of needing the settings table edited by hand.
 
 ## Retention
 

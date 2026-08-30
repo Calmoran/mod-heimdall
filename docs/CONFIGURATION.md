@@ -21,6 +21,24 @@ The bot provisions its own Open, Claimed and Closed ticket categories, its panel
 channel and its staff-only ticket queue channel on first run, storing their IDs in
 `heimdall_setting`. The GM command audit channel is created only if that
 module option is switched on.
-`DISCORD_PANEL_CHANNEL_ID`, `DISCORD_OPEN_CATEGORY_ID` and
-`DISCORD_CLAIMED_CATEGORY_ID` are therefore optional; set one only to pin the
-bot to a channel you made yourself, and it will never be overwritten.
+`DISCORD_PANEL_CHANNEL_ID`, `DISCORD_OPEN_CATEGORY_ID`,
+`DISCORD_CLAIMED_CATEGORY_ID` and `DISCORD_CLOSED_CATEGORY_ID` are therefore
+optional; set one only to pin the bot to a channel you made yourself, and it
+will never be overwritten.
+
+Recommended, not required: after the first run, copy the ids the bot reports
+into `.env`.
+
+```
+Created open tickets category (1408...) and stored it for future runs.
+```
+
+A zero-configuration first run is worth keeping, so nothing forces you to. What
+pinning buys you is that the layout is written down somewhere you can read,
+rather than living only in `heimdall_setting` where you have to query for it.
+
+An id you set here must exist. Heimdall checks each one at startup and refuses
+to start if one does not resolve, naming the variable and the id. It cannot
+recover the way it does from a stored id that stopped resolving: creating a
+replacement would leave your `.env` still naming the dead channel, and a new
+category would appear on every restart.

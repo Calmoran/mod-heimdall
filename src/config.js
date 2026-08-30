@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import path from 'node:path'
 
 const required = [
@@ -26,10 +27,6 @@ function closedChannelDeleteHours(env) {
   return positiveInt(env.CLOSED_CHANNEL_DELETE_DAYS, 'CLOSED_CHANNEL_DELETE_DAYS', 7, 0) * 24
 }
 
-// The panel channel and the two categories are provisioned on first run and their IDs stored in
-// the database, so these are optional. An untouched `replace_with_...` counts as absent, not as a
-// configured value - otherwise a fresh install would try to fetch a channel named after the
-// placeholder. A real ID set here always wins and is never overwritten.
 function logLevel(value) {
   const level = (value ?? 'info').trim().toLowerCase()
   if (!['error', 'warn', 'info', 'debug'].includes(level)) {
@@ -38,10 +35,31 @@ function logLevel(value) {
   return level
 }
 
+// The panel channel and the three categories are provisioned on first run and their IDs stored in
+// the database, so these are optional. An untouched `replace_with_...` counts as absent, not as a
+// configured value - otherwise a fresh install would try to fetch a channel named after the
+// placeholder. A real ID set here always wins, and is checked at startup rather than trusted.
 function optionalId(value) {
   const trimmed = (value ?? '').trim()
   if (!trimmed || trimmed.startsWith('replace_with_')) return null
   return trimmed
+}
+
+// The instance lock and the delivery leases are owned by the PROCESS, not by the configuration.
+// An id taken straight from BOT_INSTANCE_ID could not see the likeliest accident: two copies
+// started from one .env share that value, so the second read the lock row, found its own name
+// there and concluded it held the lock. Both then answered the same button presses, and the loser's
+// complaints about work the winner had already done correctly ("this ticket is no longer available
+// to claim") read as bugs in the ticket logic.
+//
+// The pid is included because it is the number an operator can act on; the random suffix because
+// pids are reused. BOT_INSTANCE_ID stays the human-readable label in messages and logs.
+export function deriveRunId(instanceId, pid = process.pid, entropy = crypto.randomBytes(3).toString('hex')) {
+  const suffix = `-${pid}-${entropy}`
+  // heimdall_delivery.lease_owner is VARCHAR(64) and the schema is frozen, so a long
+  // BOT_INSTANCE_ID gives up characters rather than the parts that make this id unique. Truncating
+  // the other way round would let two processes share an id again, which is the bug this fixes.
+  return `${String(instanceId).slice(0, 64 - suffix.length)}${suffix}`
 }
 
 export function loadConfig(env = process.env) {
@@ -58,6 +76,7 @@ export function loadConfig(env = process.env) {
     panelChannelId: optionalId(env.DISCORD_PANEL_CHANNEL_ID),
     openCategoryId: optionalId(env.DISCORD_OPEN_CATEGORY_ID),
     claimedCategoryId: optionalId(env.DISCORD_CLAIMED_CATEGORY_ID),
+    closedCategoryId: optionalId(env.DISCORD_CLOSED_CATEGORY_ID),
     mysql: {
       host: env.MYSQL_HOST,
       port: positiveInt(env.MYSQL_PORT, 'MYSQL_PORT', 3306),
@@ -87,5 +106,6 @@ export function loadConfig(env = process.env) {
       retainedFiles: positiveInt(env.LOG_RETAINED_FILES, 'LOG_RETAINED_FILES', 5),
     },
     instanceId: env.BOT_INSTANCE_ID,
+    runId: deriveRunId(env.BOT_INSTANCE_ID),
   })
 }
