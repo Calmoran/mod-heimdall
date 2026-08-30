@@ -1,9 +1,23 @@
 # Nothing here is generated, and no secret belongs in this tree. These exist so a working copy
-# beside a build cannot leak one in.
+# inside a core checkout cannot leak one - a careless `git add .` from the wrong directory is far
+# easier to do now that this repository lives under modules/.
 
-# Local or deployed configuration. Only the .dist template is committed.
+# Local or deployed configuration. Only templates are committed.
 *.conf
 !*.conf.dist
+bot/.env
+bot/.env.*
+!bot/.env.example
+
+# The bot's dependencies and runtime output, which now sit inside a core checkout.
+bot/node_modules/
+*.log
+*.log.*
+bot/archive/
+bot/var/
+
+# Build artefacts, if anyone configures in-tree
+build/
 
 # Backups and scratch files of every shape
 *.bak
@@ -11,6 +25,3 @@
 *.orig
 *.rej
 *~
-
-# Build artefacts, if anyone configures in-tree
-build/

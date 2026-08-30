@@ -270,7 +270,7 @@ test('the install guide and the preflight name the same permissions', () => {
   // These two drifted once already: the guide asked for Attach Files and Use Application Commands,
   // neither of which the bot uses. An operator reading the guide and an operator reading a startup
   // warning have to be told the same thing.
-  const guide = fs.readFileSync(new URL('../docs/INSTALL.md', import.meta.url), 'utf8')
+  const guide = fs.readFileSync(new URL('../../docs/INSTALL-bot.md', import.meta.url), 'utf8')
   for (const permission of REQUIRED_PERMISSIONS) {
     assert.ok(guide.includes(permission.name), `docs/INSTALL.md does not mention ${permission.name}`)
   }
@@ -717,7 +717,7 @@ test('a reply defers before touching SOAP so a slow refusal still reaches the GM
 // out of channels it could then neither read nor repair. The guide and the code have to agree that
 // this role is Discord's to create, not the operator's.
 test('the install guide does not tell anyone to create a role for the bot', () => {
-  const guide = fs.readFileSync(new URL('../docs/INSTALL.md', import.meta.url), 'utf8')
+  const guide = fs.readFileSync(new URL('../../docs/INSTALL-bot.md', import.meta.url), 'utf8')
   assert.doesNotMatch(guide, /roles: Admin, Moderator, Game Master, and Bot/,
     'the guide still asks the operator to create a Bot role')
   assert.match(guide, /Do not create a role for the bot/)

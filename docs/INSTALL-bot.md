@@ -5,9 +5,13 @@ realm. Do not start on a public realm.
 
 ## 1. Install the module first
 
-Follow the module installation guide. On stock AzerothCore that includes applying one small core
-patch before building; cores based on mod-playerbots do not need it. Confirm its SQL tables exist in
-the Characters database. Keep the bot account limited to those tables using
+Follow [the module installation guide](INSTALL.md). On stock AzerothCore that includes applying one
+small core patch before building; cores based on mod-playerbots do not need it. Confirm its SQL
+tables exist in the Characters database.
+
+The bot is not a second download: it lives in this repository's `bot/` directory, so the clone you
+just installed the module from already contains it. Every command in this guide runs from `bot/`
+unless it says otherwise. Keep the bot account limited to those tables using
 `deploy/mysql-grants.sql`; replace every placeholder before running it.
 
 That file creates the account for both `@localhost` and `@127.0.0.1`, and you
@@ -221,7 +225,7 @@ all of them cost someone an afternoon.
    one bot running without ever having said so — the symptom is every action happening twice and the
    loser complaining about work the winner already did. On Windows,
    `Get-CimInstance Win32_Process -Filter "Name='node.exe'"` lists them.
-3. Update both trees.
+3. Update the repository — one `git pull` brings both halves, so they cannot drift apart.
 4. Apply any module SQL the release names, in order.
 5. **On stock AzerothCore, reapply the core patch if you also updated the core.** A core update can
    revert it. Forgetting shows up as a compile failure, not as odd behaviour.

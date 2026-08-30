@@ -1,6 +1,10 @@
 # Module installation
 
-1. Start from a supported AzerothCore source tree and put this directory in its `modules/` folder. Cloning it there works; linking it in from its own directory is better, and is described under "Keeping the module outside the core tree" below.
+1. Start from a supported AzerothCore source tree and put this repository in its `modules/` folder
+   as `modules/mod-heimdall`. One clone brings both halves: the module the build compiles, and the
+   Discord bot in `bot/`, which the build ignores. Cloning straight into `modules/` works; linking
+   it in from its own directory is better, and is described under "Keeping the repository outside
+   the core tree" below.
 2. **On stock AzerothCore, apply the core patch first.** From the root of your core checkout:
 
    ```
@@ -54,7 +58,10 @@
    (default on). The badge is rendered from a protocol flag a player character cannot forge, so a
    player can both notice a staff reply and trust who sent it; turn it off only for an in-character
    support desk.
-7. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
+7. Install the bot from this same clone's `bot/` directory, following
+   [INSTALL-bot.md](INSTALL-bot.md). Give its MySQL account privileges only on tables named
+   `heimdall_%`. There is no second repository: the two halves version together and a single
+   `git pull` updates both.
 
 The module only reads `gm_ticket`. All in-game lifecycle changes must use documented AzerothCore GM commands over the existing loopback SOAP service; never grant the bot write access to `gm_ticket`.
 
@@ -64,14 +71,16 @@ the game receives the same retention treatment.
 
 Rollback: set `Heimdall.Enabled = 0`, stop the companion bot, and restart the worldserver during maintenance. Keep the module tables for audit and rollback unless the operator explicitly decides to remove them after a backup.
 
-## Keeping the module outside the core tree
+## Keeping the repository outside the core tree
 
-AzerothCore discovers modules by looking in `modules/` inside its source tree, which means a module
-checked out there sits inside someone else's repository. That is awkward: the core's `.gitignore`
-excludes `modules/*`, so your module's own history lives somewhere the core does not track and every
-core update is a chance to lose it.
+AzerothCore discovers modules by looking in `modules/` inside its source tree, which means a
+checkout there sits inside someone else's repository. That is awkward: the core's `.gitignore`
+excludes `modules/*`, so this repository's history lives somewhere the core does not track and every
+core update is a chance to lose it. It matters slightly more now that the bot lives here too — the
+bot's `.env` and archive directory sit inside the core checkout, which is why this repository's
+`.gitignore` covers them.
 
-Keeping the module in its own directory and linking it in avoids that. On Windows:
+Keeping the repository in its own directory and linking it in avoids that. On Windows:
 
 ```
 mklink /J "C:\path\to\azerothcore-wotlk\modules\mod-heimdall" "C:\path\to\mod-heimdall"
@@ -185,8 +194,8 @@ rebuild.
 Before testing a change, confirm the installed `worldserver` binary is newer than the module source.
 A stale binary produces results that look like bugs in your configuration.
 
-**If you copied the module into `modules/` rather than linking it, copy it again after every source
-change.** A copy does not track the original, so the build recompiles the old code and succeeds,
+**If you copied the repository into `modules/` rather than linking it, copy it again after every
+source change.** A copy does not track the original, so the build recompiles the old code and succeeds,
 which looks exactly like a change that did not work. A directory junction (`mklink /J` on Windows,
 a symlink elsewhere) avoids the problem entirely and is transparent to CMake.
 
