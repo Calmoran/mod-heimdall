@@ -291,6 +291,24 @@ export class TicketRepository {
     return rows
   }
 
+  // The module publishes one row per realm holding the identities that survived its startup
+  // validation. Null means no row exists at all - the module has not restarted since the upgrade
+  // that started publishing - which the caller must treat differently from an empty list.
+  async gmIdentityNames() {
+    const [rows] = await this.pool.execute(
+      "SELECT setting_value FROM heimdall_setting WHERE setting_key LIKE 'ingame.gm_identities.%'",
+    )
+    if (!rows.length) return null
+    const names = new Set()
+    for (const row of rows) {
+      for (const name of String(row.setting_value ?? '').split(',')) {
+        const trimmed = name.trim()
+        if (trimmed) names.add(trimmed)
+      }
+    }
+    return [...names]
+  }
+
   async activeStaffIds() {
     const [rows] = await this.pool.execute('SELECT discord_user_id FROM heimdall_staff WHERE enabled = 1')
     return rows.map((row) => row.discord_user_id)

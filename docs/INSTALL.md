@@ -62,10 +62,26 @@ Check the same permissions are not denied by an overwrite on the ticket categori
 channel, or the queue board channel. The bot checks all six places at startup and names anything
 missing.
 
-Create or retain these guild roles: Admin, Moderator, Game Master, and Bot.
-Create an `#open-a-ticket` panel channel, an Open Tickets category, and a
-Claimed Tickets category. Copy their IDs and the role IDs into the environment
-file. Place the Bot role above roles whose channel permissions it must manage.
+Create or retain three guild roles: **Admin, Moderator and Game Master**. Copy their IDs into the
+environment file.
+
+**Do not create a role for the bot.** Discord creates one automatically when you invite the
+application — a *managed* role named after it, which you cannot delete and cannot add anyone to. That
+is the only role the bot is ever in, and Heimdall finds it by itself. There is no
+`DISCORD_BOT_ROLE_ID` in `.env.example` for that reason.
+
+Making a role called "Bot" by hand and pasting its id is the single worst mistake available on a
+first install: the bot grants channel access to a role it is not in, locks itself out of the channels
+it just created, and cannot repair them afterwards because Discord does not let you manage a channel
+you cannot view. Current versions refuse to start rather than provision in that state; the recovery
+for an install that already did is in the module's INSTALL guide under Troubleshooting.
+
+Drag that managed role **above** any role whose channel permissions the bot must manage.
+
+You do not need to create channels. Heimdall provisions its own on first run — a support category
+holding the `open-a-ticket` panel and the `ticket-queue` board, plus the Open, Claimed and Closed
+ticket categories — appended to the end of your channel list, and remembers them. It prints the ids
+afterwards if you would rather pin them in `.env`.
 
 ## 3. Enable SOAP and create the account the bot uses
 

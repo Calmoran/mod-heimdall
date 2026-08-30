@@ -1,9 +1,13 @@
 import crypto from 'node:crypto'
 import path from 'node:path'
 
+// DISCORD_BOT_ROLE_ID is deliberately not here. It is the one role id an operator must NOT create -
+// Discord makes a managed role per application and that is the only role a bot is ever in - so
+// asking for it beside three ids they do create invited exactly the mistake that bricked an install.
+// The bot finds its own; setting it is optional and is verified properly when it is set.
 const required = [
   'DISCORD_TOKEN', 'DISCORD_GUILD_ID', 'DISCORD_ADMIN_ROLE_ID', 'DISCORD_MODERATOR_ROLE_ID',
-  'DISCORD_GM_ROLE_ID', 'DISCORD_BOT_ROLE_ID', 'MYSQL_HOST', 'MYSQL_DATABASE',
+  'DISCORD_GM_ROLE_ID', 'MYSQL_HOST', 'MYSQL_DATABASE',
   'MYSQL_USER', 'MYSQL_PASSWORD', 'SOAP_URL', 'SOAP_USER', 'SOAP_PASSWORD', 'ARCHIVE_DIR', 'BOT_INSTANCE_ID',
 ]
 
@@ -72,11 +76,16 @@ export function loadConfig(env = process.env) {
     adminRoleId: env.DISCORD_ADMIN_ROLE_ID,
     moderatorRoleId: env.DISCORD_MODERATOR_ROLE_ID,
     gmRoleId: env.DISCORD_GM_ROLE_ID,
-    botRoleId: env.DISCORD_BOT_ROLE_ID,
+    botRoleId: optionalId(env.DISCORD_BOT_ROLE_ID),
     panelChannelId: optionalId(env.DISCORD_PANEL_CHANNEL_ID),
     openCategoryId: optionalId(env.DISCORD_OPEN_CATEGORY_ID),
     claimedCategoryId: optionalId(env.DISCORD_CLAIMED_CATEGORY_ID),
     closedCategoryId: optionalId(env.DISCORD_CLOSED_CATEGORY_ID),
+    supportCategoryId: optionalId(env.DISCORD_SUPPORT_CATEGORY_ID),
+    queueChannelId: optionalId(env.DISCORD_QUEUE_CHANNEL_ID),
+    // Named rather than fixed, because an operator with an existing support structure may want
+    // Heimdall's channels to read as part of it.
+    supportCategoryName: (env.DISCORD_SUPPORT_CATEGORY_NAME || 'Heimdall Support').trim().slice(0, 100),
     mysql: {
       host: env.MYSQL_HOST,
       port: positiveInt(env.MYSQL_PORT, 'MYSQL_PORT', 3306),

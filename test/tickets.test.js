@@ -199,28 +199,34 @@ test('the log rotates and drops the oldest file at the retained count', () => {
   }
 })
 
-// A stand-in for a guild where the bot holds everything except the named permissions.
+// A stand-in for a guild where the bot holds everything except the named permissions. Every place
+// the preflight looks resolves, so the run reflects a fully provisioned guild.
 function serviceMissing(...missing) {
   const denied = new Set(missing)
   const held = { has: (flag) => !denied.has(flag) }
   const lines = []
   const service = Object.create(HeimdallService.prototype)
-  service.logger = { error: (line) => lines.push(['error', line]), warn: (line) => lines.push(['warn', line]), info: (line) => lines.push(['info', line]) }
-  service.ids = {}
+  service.logger = { error: (line) => lines.push(['error', line]), warn: (line) => lines.push(['warn', line]), info: (line, meta) => lines.push(['info', line, meta]) }
+  service.ids = {
+    openCategoryId: 'cat-open', claimedCategoryId: 'cat-claimed', closedCategoryId: 'cat-closed',
+    supportCategoryId: 'cat-support', panelChannelId: 'chan-panel', queueChannelId: 'chan-queue',
+  }
   service.repository = { getSetting: async () => null }
   service.guild = { members: { fetchMe: async () => ({ permissions: held }) } }
-  service.client = { channels: { fetch: async () => null } }
+  service.client = { channels: { fetch: async () => ({ permissionsFor: () => held }) } }
   return { service, lines }
 }
 
-test('the permissions preflight names what is missing and what it breaks', async () => {
+test('the permissions preflight names what is missing and what it breaks, then stops', async () => {
   const { service, lines } = serviceMissing(PermissionFlagsBits.CreatePrivateThreads)
-  await service.verifyPermissions()
+
+  // It used to log "cannot work without" and carry on regardless, provisioning more channels it
+  // could not reach and burying that line under the failures that followed.
+  await assert.rejects(() => service.verifyPermissions(), /cannot work without/)
 
   const errors = lines.filter(([level]) => level === 'error').map(([, line]) => line)
   assert.ok(errors.some((line) => line.includes('Create Private Threads')), 'did not name the permission')
   assert.ok(errors.some((line) => line.includes('no ticket has any controls')), 'did not say what breaks')
-  assert.ok(errors.some((line) => line.includes('cannot work without')), 'did not summarise')
 })
 
 test('a degrading permission warns rather than erroring, and a full set is silent', async () => {
@@ -232,6 +238,24 @@ test('a degrading permission warns rather than erroring, and a full set is silen
   const complete = serviceMissing()
   await complete.service.verifyPermissions()
   assert.deepEqual(complete.lines.map(([level]) => level), ['info'])
+  // Both numbers are reported. "places=2" reads exactly like success on its own.
+  const [, , coverage] = complete.lines[0]
+  assert.equal(coverage.places, coverage.expected, 'a full guild did not report full coverage')
+  assert.equal(coverage.expected, 7)
+})
+
+// The bug this exists for: on a first run the queue board was created AFTER the preflight, so the
+// one run where configuration is most likely wrong was the run with the least coverage - and the
+// printed count hid it, because places=5 and places=6 both read as success.
+test('a place the preflight could not check is reported as unchecked', async () => {
+  const { service, lines } = serviceMissing()
+  service.ids.queueChannelId = null
+  await service.verifyPermissions()
+
+  const warnings = lines.filter(([level]) => level === 'warn').map(([, line]) => line)
+  assert.ok(warnings.some((line) => line.includes('6 of 7 places')), 'did not report short coverage')
+  assert.ok(warnings.some((line) => line.includes('queue board')), 'did not name what went unchecked')
+  assert.ok(warnings.some((line) => line.includes('not a place that passed')))
 })
 
 test('every required permission says what breaks without it', () => {
@@ -287,6 +311,7 @@ function adminService() {
     staff: async () => ({ gm_name: 'Spikebot' }),
     ticketsWithOpenWork: async () => [ticket],
     getThreadId: async () => 'thread-7',
+    gmIdentityNames: async () => ['Spikebot'],
   }
   service.refreshQueueBoard = async () => {}
   service.refreshTicketHeader = async () => {}
@@ -470,6 +495,7 @@ function replyService(online) {
     recordMessage: async () => {},
     playerContext: async () => (online === null ? null : { online }),
   }
+  service.setIdentityHeld = async () => {}
   service.staffThreadFor = async () => ({ send: async () => {} })
   service.refreshTicketHeader = async () => {}
   return { service, sent }
@@ -488,7 +514,10 @@ function replyInteraction() {
     user: { id: '100' },
     member: { roles: { cache: new Map([['role-gm', {}]]) } },
     channel: null,
+    deferred: false,
+    deferReply: async function deferReply() { this.deferred = true },
     reply: async (payload) => { replies.push(payload) },
+    editReply: async (payload) => { replies.push(payload) },
   }
 }
 
@@ -542,4 +571,156 @@ test('an install that never enabled the audit stays quiet', async () => {
   service.repository = { getSetting: async () => null }
   service.guild = { channels: { create: async () => assert.fail('created a channel unasked') } }
   assert.equal(await service.auditChannel({ create: false }), null)
+})
+
+// A bot cannot be added to a role you create. The operator made one called "BOT", pasted its id,
+// and the bot provisioned channels granting access to a role it was not in - locking itself out of
+// channels it could then neither read nor repair. One wrong id, an install only manual surgery
+// could fix. So this refuses before anything is provisioned.
+function botRoleService(configuredId, memberOf = []) {
+  const service = Object.create(HeimdallService.prototype)
+  const logged = []
+  service.logger = { error: () => {}, warn: () => {}, info: (line) => logged.push(line) }
+  service.config = { botRoleId: configuredId }
+  service.client = { user: { id: 'bot-user' } }
+  service.guild = {
+    name: 'Test Guild',
+    members: { fetchMe: async () => ({ roles: { cache: new Map(memberOf.map((id) => [id, { id, managed: id === 'managed-role' }])) } }) },
+    roles: { botRoleFor: () => ({ id: 'managed-role', name: 'Heimdall' }) },
+  }
+  return { service, logged }
+}
+
+test('a bot role the bot is not in refuses before anything is provisioned', async () => {
+  const { service } = botRoleService('hand-made-role', ['managed-role'])
+  await assert.rejects(() => service.verifyBotRole(), (error) => {
+    assert.match(error.message, /"hand-made-role"/)
+    assert.match(error.message, /cannot be added to a role you create/)
+    // Naming the right id is the whole point: the operator has to know what to put there.
+    assert.match(error.message, /managed-role/)
+    assert.match(error.message, /Nothing has been provisioned/)
+    return true
+  })
+  assert.equal(service.botRoleId, undefined, 'a rejected role must not be adopted')
+})
+
+test('an unset bot role is found rather than demanded', async () => {
+  const { service, logged } = botRoleService(null, ['managed-role'])
+  await service.verifyBotRole()
+  assert.equal(service.botRoleId, 'managed-role')
+  assert.ok(logged.some((line) => line.includes('managed role')))
+})
+
+test('a correctly configured bot role is accepted as given', async () => {
+  const { service } = botRoleService('managed-role', ['managed-role'])
+  await service.verifyBotRole()
+  assert.equal(service.botRoleId, 'managed-role')
+})
+
+// The pin fails on the run that creates the channel because Discord has not finished applying the
+// overwrites yet. It is a propagation race, not a permission fault, and it greeted every fresh
+// install with an alarming warning that was not true.
+test('the queue board pin is retried once before it is reported as a failure', async () => {
+  const warnings = []
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: (line) => warnings.push(line), info: () => {} }
+
+  let attempts = 0
+  const flaky = { pin: async () => { attempts += 1; if (attempts === 1) throw new Error('Missing Permissions') } }
+  assert.equal(await service.pinWithRetry(flaky, 'Ticket queue board'), true)
+  assert.equal(attempts, 2)
+  assert.equal(warnings.length, 0, 'a recovered pin must not warn')
+
+  const broken = { pin: async () => { throw new Error('Missing Permissions') } }
+  assert.equal(await service.pinWithRetry(broken, 'Ticket queue board'), false)
+  assert.match(warnings[0], /Could not pin the queue board/)
+})
+
+// The bug this exists for: validateGmName is a format check, so a GM name that simply does not
+// exist on the realm was accepted here and only refused later, over SOAP, to a GM who was
+// mid-conversation with a player.
+function identityService(names) {
+  const warnings = []
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: (line) => warnings.push(line), info: () => {} }
+  service.repository = { gmIdentityNames: async () => names }
+  return { service, warnings }
+}
+
+test('staff-add refuses a GM name the realm has not accepted, and lists the real ones', async () => {
+  const { service } = identityService(['Spikebot', 'Helpdesk'])
+  await assert.rejects(() => service.assertConfiguredIdentity('Spikeplay'), (error) => {
+    assert.match(error.message, /"Spikeplay" is not a configured GM identity/)
+    assert.match(error.message, /Spikebot, Helpdesk/)
+    return true
+  })
+  await assert.doesNotReject(() => service.assertConfiguredIdentity('Spikebot'))
+  // The realm is case-insensitive about character names and so is this.
+  await assert.doesNotReject(() => service.assertConfiguredIdentity('spikebot'))
+})
+
+test('an empty identity list is explained rather than blamed on the name', async () => {
+  const { service } = identityService([])
+  await assert.rejects(() => service.assertConfiguredIdentity('Spikebot'), /No GM identities are configured/)
+})
+
+test('a module that has not published its list warns instead of blocking', async () => {
+  // Otherwise every staff-add fails on an install whose worldserver has not restarted since the
+  // upgrade that started publishing the list.
+  const { service, warnings } = identityService(null)
+  await assert.doesNotReject(() => service.assertConfiguredIdentity('Anything'))
+  assert.match(warnings[0], /has not published its GM identity list/)
+})
+
+test('a reply defers before touching SOAP so a slow refusal still reaches the GM', async () => {
+  // Discord closes an interaction after three seconds; a slow SOAP failure used to blow that window
+  // and the GM saw nothing at all, exactly when something had gone wrong.
+  const order = []
+  const { service } = replyService(true)
+  service.setIdentityHeld = async () => { order.push('soap') }
+  service.repository.getSetting = async () => 'offline'
+
+  const interaction = replyInteraction()
+  interaction.deferReply = async () => { order.push('defer') }
+  await service.replyToPlayer(interaction, REPLY_TICKET, 'anything at all')
+
+  assert.deepEqual(order, ['defer', 'soap'], 'SOAP was called before the interaction was deferred')
+})
+
+// Telling an operator to create a Bot role is what bricked a first install: the bot cannot be a
+// member of a role you make, so it granted channel access to a role it was not in and locked itself
+// out of channels it could then neither read nor repair. The guide and the code have to agree that
+// this role is Discord's to create, not the operator's.
+test('the install guide does not tell anyone to create a role for the bot', () => {
+  const guide = fs.readFileSync(new URL('../docs/INSTALL.md', import.meta.url), 'utf8')
+  assert.doesNotMatch(guide, /roles: Admin, Moderator, Game Master, and Bot/,
+    'the guide still asks the operator to create a Bot role')
+  assert.match(guide, /Do not create a role for the bot/)
+  assert.match(guide, /managed/)
+
+  const example = fs.readFileSync(new URL('../.env.example', import.meta.url), 'utf8')
+  assert.doesNotMatch(example, /^DISCORD_BOT_ROLE_ID=/m,
+    '.env.example still offers DISCORD_BOT_ROLE_ID as something to fill in')
+})
+
+test('the provisioned-id block names every id an operator can pin', () => {
+  const service = Object.create(HeimdallService.prototype)
+  const lines = []
+  service.logger = { error: () => {}, warn: () => {}, info: (line) => lines.push(line) }
+  service.ids = {
+    panelChannelId: '1', queueChannelId: '2', openCategoryId: '3',
+    claimedCategoryId: '4', closedCategoryId: '5', supportCategoryId: '6',
+  }
+  service.reportProvisionedIds()
+
+  const block = lines[0]
+  // Every id the bot provisions must be pinnable, or the block is a trap: an operator who pins the
+  // ones on offer and restarts finds the rest still floating.
+  for (const variable of ['DISCORD_PANEL_CHANNEL_ID', 'DISCORD_QUEUE_CHANNEL_ID', 'DISCORD_OPEN_CATEGORY_ID',
+    'DISCORD_CLAIMED_CATEGORY_ID', 'DISCORD_CLOSED_CATEGORY_ID', 'DISCORD_SUPPORT_CATEGORY_ID']) {
+    assert.ok(block.includes(`${variable}=`), `the block omits ${variable}`)
+  }
+  // And it must be honest about what pinning costs.
+  assert.match(block, /survive restarts without it/)
+  assert.match(block, /switches\s+off the self-heal/)
 })

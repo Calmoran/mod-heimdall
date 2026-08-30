@@ -111,9 +111,15 @@ export class HeimdallService {
     this.logger = logger
   }
 
+  // Order matters here and was wrong. The queue board used to be created lazily, after
+  // verifyPermissions had already run, so on a first install - the run where the configuration is
+  // most likely to be wrong - it was the one place never checked. The layout is now complete before
+  // anything inspects it, and verifyBotRole comes before all of it because provisioning with the
+  // wrong bot role is unrecoverable.
   async initialize() {
     this.guild = await this.client.guilds.fetch(this.config.guildId)
     await this.verifyConfiguredRoles()
+    await this.verifyBotRole()
     await this.provisionGuildLayout()
     await this.secureCategories()
     this.client.on('interactionCreate', (interaction) => this.handleInteraction(interaction).catch((error) => this.failInteraction(interaction, error)))
@@ -121,6 +127,68 @@ export class HeimdallService {
     await this.verifyPermissions()
     await this.publishPanel()
     await this.warnIfRosterEmpty()
+    this.reportProvisionedIds()
+  }
+
+  // A bot cannot be added to a role. Discord creates exactly one managed role per application and
+  // that is the only role the bot is ever in. DISCORD_BOT_ROLE_ID sat in .env beside the admin,
+  // moderator and GM ids, which an operator genuinely does create by hand, and nothing said this
+  // one was different - so the natural thing to do was create a role called "BOT" and paste its id.
+  //
+  // What that costs is not a warning. Provisioning denies ViewChannel to @everyone and allows it to
+  // the configured roles, so the allow lands on a role the bot is not in and it locks itself out of
+  // channels it has just created. A server-level permission does not override a channel-level deny,
+  // and Discord does not let you manage a channel you cannot view - so secureCategories, whose
+  // entire job is repairing overwrites, is locked out as well. Correcting .env afterwards changes
+  // nothing, because the overwrites already exist. One wrong id on a first run leaves an install
+  // that only manual surgery in Discord can fix.
+  //
+  // Hence a refusal rather than a warning, and hence the id being optional: the bot can find its own
+  // managed role, so the safest configuration is not to set this at all.
+  async verifyBotRole() {
+    const me = await this.guild.members.fetchMe()
+    const managed = this.guild.roles.botRoleFor(this.client.user)
+      ?? me.roles.cache.find((role) => role.managed)
+      ?? null
+
+    if (!this.config.botRoleId) {
+      if (!managed) {
+        throw new Error('Could not find this application\'s managed role in '
+          + `${this.guild.name}. Set DISCORD_BOT_ROLE_ID to the role Discord created for the bot.`)
+      }
+      this.botRoleId = managed.id
+      this.logger.info(`Using this application's managed role ${managed.name} (${managed.id}).`)
+      return
+    }
+
+    if (me.roles.cache.has(this.config.botRoleId)) {
+      this.botRoleId = this.config.botRoleId
+      return
+    }
+
+    throw new Error(`DISCORD_BOT_ROLE_ID is ${JSON.stringify(this.config.botRoleId)}, which this bot is `
+      + 'not a member of. A bot cannot be added to a role you create; it only ever holds the managed '
+      + `role Discord made for the application${managed ? `, which is ${managed.name} (${managed.id})` : ''}. `
+      + 'Set it to that id, or remove the line entirely and Heimdall will find it itself. '
+      + 'Nothing has been provisioned: starting with the wrong role here creates channels this bot '
+      + 'cannot read and cannot repair.')
+  }
+
+  // Five ids, previously five log lines scattered among everything else, which is what prompted an
+  // operator to ask whether the bot could write them into .env for them. It cannot - that file holds
+  // the token and two passwords, and a half-finished write would cost them all three - so it prints
+  // them together instead, in the form they would have to type.
+  reportProvisionedIds() {
+    this.logger.info('Provisioned Discord layout. To pin it, add these to your .env:\n'
+      + `  DISCORD_PANEL_CHANNEL_ID=${this.ids.panelChannelId}\n`
+      + `  DISCORD_QUEUE_CHANNEL_ID=${this.ids.queueChannelId}\n`
+      + `  DISCORD_OPEN_CATEGORY_ID=${this.ids.openCategoryId}\n`
+      + `  DISCORD_CLAIMED_CATEGORY_ID=${this.ids.claimedCategoryId}\n`
+      + `  DISCORD_CLOSED_CATEGORY_ID=${this.ids.closedCategoryId}\n`
+      + '  DISCORD_SUPPORT_CATEGORY_ID=' + this.ids.supportCategoryId + '\n'
+      + 'Optional: these are already stored in heimdall_setting and survive restarts without it. '
+      + 'Pinning buys explicit control and a config you can read, not durability - and it switches '
+      + 'off the self-heal that recreates one of these if it is ever deleted.')
   }
 
   // verifyConfiguredRoles does this for role ids; a missing permission is the same kind of problem
@@ -130,14 +198,15 @@ export class HeimdallService {
   async verifyPermissions() {
     const me = await this.guild.members.fetchMe()
     const places = [['the server', null]]
-    const queueChannelId = await this.repository.getSetting('discord.queue_channel_id')
-    for (const [label, id] of [
+    const expected = [
       ['Open Tickets', this.ids.openCategoryId],
       ['Claimed Tickets', this.ids.claimedCategoryId],
       ['Closed Tickets', this.ids.closedCategoryId],
+      ['Heimdall Support', this.ids.supportCategoryId],
       ['ticket panel', this.ids.panelChannelId],
-      ['queue board', queueChannelId],
-    ]) {
+      ['queue board', this.ids.queueChannelId],
+    ]
+    for (const [label, id] of expected) {
       if (!id) continue
       const channel = await this.client.channels.fetch(id).catch(() => null)
       if (channel) places.push([`the ${label} category`, channel])
@@ -152,8 +221,18 @@ export class HeimdallService {
       }
     }
 
+    // The count used to be printed on its own, and "places=2" reads exactly like success to an
+    // operator who has no idea what the number should be. Both numbers, always, so a short count is
+    // visible as a short count.
+    const coverage = { checked: REQUIRED_PERMISSIONS.length, places: places.length, expected: expected.length + 1 }
+    if (places.length < coverage.expected) {
+      this.logger.warn(`Permissions preflight could only check ${places.length} of ${coverage.expected} places: `
+        + `${expected.filter(([, id]) => !id).map(([label]) => label).join(', ') || 'some channels could not be fetched'}. `
+        + 'A place that cannot be checked is not a place that passed.')
+    }
+
     if (!problems.length) {
-      this.logger.info('Permissions preflight passed', { checked: REQUIRED_PERMISSIONS.length, places: places.length })
+      this.logger.info('Permissions preflight passed', coverage)
       return
     }
 
@@ -163,11 +242,16 @@ export class HeimdallService {
       else this.logger.warn(line)
     }
 
+    // "Cannot work without" used to be printed and then ignored: the bot carried on, provisioned
+    // more channels it could not reach, and buried the one line that said what was wrong under the
+    // stack traces that followed. Either the wording was wrong or the behaviour was; the wording is
+    // right, so it stops here.
     const fatal = problems.filter((problem) => problem.fatal)
     if (fatal.length) {
-      this.logger.error(`Heimdall is missing ${fatal.length} permission(s) it cannot work without. `
-        + 'Fix the bot role, or the overwrites on the ticket categories, and restart. '
-        + 'Tickets opened before then will not behave correctly.')
+      throw new Error(`Heimdall is missing ${fatal.length} permission(s) it cannot work without: `
+        + `${fatal.map((problem) => `"${problem.name}" in ${problem.where}`).join('; ')}. `
+        + 'Fix the bot role, or the overwrites on the ticket categories, and restart. Stopping here '
+        + 'rather than continuing to build channels this bot cannot use.')
     }
   }
 
@@ -190,8 +274,9 @@ export class HeimdallService {
       DISCORD_ADMIN_ROLE_ID: this.config.adminRoleId,
       DISCORD_MODERATOR_ROLE_ID: this.config.moderatorRoleId,
       DISCORD_GM_ROLE_ID: this.config.gmRoleId,
-      DISCORD_BOT_ROLE_ID: this.config.botRoleId,
     }
+    // DISCORD_BOT_ROLE_ID is deliberately absent: it is optional now, and verifyBotRole checks it
+    // properly - that the bot is actually IN it, which resolving the id alone never proved.
     const bad = Object.entries(configured)
       .filter(([, id]) => !roles.get(id))
       .map(([name, id]) => `${name} (${JSON.stringify(id)})`)
@@ -205,34 +290,81 @@ export class HeimdallService {
   // explicitly configured is created here and its ID stored, so later runs reuse it. If an object
   // was deleted in Discord, the stored ID stops resolving and it is recreated.
   async provisionGuildLayout() {
+    // Populates the channel cache so new categories can be appended to the end of the list. A bot
+    // being installed should add itself at the bottom, not reorder an established server's sidebar
+    // and push the operator's own channels down.
+    await this.guild.channels.fetch()
+    const position = this.guild.channels.cache.size + 1
+
+    // Everything the bot creates for itself lives in one category, so an operator evaluating
+    // Heimdall - or removing it - has one place to look. The panel channel and the queue board used
+    // to be created loose at the top of the guild, which was both untidy and inconsistent with the
+    // three ticket categories beside them.
+    //
+    // The two have opposite audiences and that is fine: the category carries no overwrites, so the
+    // panel channel stays visible to players, while the queue board keeps its own deny on @everyone.
+    const supportCategoryId = await this.resolveGuildChannel({
+      configured: this.config.supportCategoryId,
+      envVar: 'DISCORD_SUPPORT_CATEGORY_ID',
+      settingKey: 'discord.support_category_id',
+      describe: 'Heimdall support category',
+      create: () => this.guild.channels.create({ name: this.config.supportCategoryName, type: ChannelType.GuildCategory, position, reason: 'mod-heimdall first run' }),
+    })
+
     this.ids = {
+      supportCategoryId,
       openCategoryId: await this.resolveGuildChannel({
         configured: this.config.openCategoryId,
         envVar: 'DISCORD_OPEN_CATEGORY_ID',
         settingKey: 'discord.open_category_id',
         describe: 'open tickets category',
-        create: () => this.guild.channels.create({ name: 'Open Tickets', type: ChannelType.GuildCategory, reason: 'mod-heimdall first run' }),
+        create: () => this.guild.channels.create({ name: 'Open Tickets', type: ChannelType.GuildCategory, position, reason: 'mod-heimdall first run' }),
       }),
       claimedCategoryId: await this.resolveGuildChannel({
         configured: this.config.claimedCategoryId,
         envVar: 'DISCORD_CLAIMED_CATEGORY_ID',
         settingKey: 'discord.claimed_category_id',
         describe: 'claimed tickets category',
-        create: () => this.guild.channels.create({ name: 'Claimed Tickets', type: ChannelType.GuildCategory, reason: 'mod-heimdall first run' }),
+        create: () => this.guild.channels.create({ name: 'Claimed Tickets', type: ChannelType.GuildCategory, position, reason: 'mod-heimdall first run' }),
       }),
       closedCategoryId: await this.resolveGuildChannel({
         configured: this.config.closedCategoryId,
         envVar: 'DISCORD_CLOSED_CATEGORY_ID',
         settingKey: 'discord.closed_category_id',
         describe: 'closed tickets category',
-        create: () => this.guild.channels.create({ name: 'Closed Tickets', type: ChannelType.GuildCategory, reason: 'mod-heimdall first run' }),
+        create: () => this.guild.channels.create({ name: 'Closed Tickets', type: ChannelType.GuildCategory, position, reason: 'mod-heimdall first run' }),
       }),
       panelChannelId: await this.resolveGuildChannel({
         configured: this.config.panelChannelId,
         envVar: 'DISCORD_PANEL_CHANNEL_ID',
         settingKey: 'discord.panel_channel_id',
         describe: 'ticket panel channel',
-        create: () => this.guild.channels.create({ name: 'open-a-ticket', type: ChannelType.GuildText, reason: 'mod-heimdall first run' }),
+        create: () => this.guild.channels.create({ name: 'open-a-ticket', type: ChannelType.GuildText, parent: supportCategoryId, reason: 'mod-heimdall first run' }),
+      }),
+      // Provisioned here rather than lazily on the first board refresh. Created late, it was the one
+      // place the permissions preflight could never check on a first run - the run where the
+      // configuration is most likely to be wrong.
+      queueChannelId: await this.resolveGuildChannel({
+        configured: this.config.queueChannelId,
+        envVar: 'DISCORD_QUEUE_CHANNEL_ID',
+        settingKey: 'discord.queue_channel_id',
+        describe: 'ticket queue channel',
+        create: () => this.guild.channels.create({
+          name: 'ticket-queue',
+          type: ChannelType.GuildText,
+          parent: supportCategoryId,
+          topic: 'Open tickets, oldest first. Updated automatically.',
+          // Staff only, denied to everyone else from the moment it exists. A player must never see
+          // which tickets are unclaimed and how long they have been ignored.
+          permissionOverwrites: [
+            { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+            { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
+            { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
+            { id: this.config.moderatorRoleId, allow: STAFF_PERMISSIONS },
+            { id: this.config.gmRoleId, allow: STAFF_PERMISSIONS },
+          ],
+          reason: 'mod-heimdall queue board',
+        }),
       }),
     }
   }
@@ -243,7 +375,7 @@ export class HeimdallService {
   categoryOverwrites() {
     return [
       { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-      { id: this.config.botRoleId, allow: ADMIN_PERMISSIONS },
+      { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
       { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
       { id: this.config.moderatorRoleId, allow: STAFF_PERMISSIONS },
       { id: this.config.gmRoleId, allow: STAFF_PERMISSIONS },
@@ -355,7 +487,14 @@ export class HeimdallService {
   }
 
   async publishPanel() {
-    const panel = await this.client.channels.fetch(this.ids.panelChannelId)
+    // An unguarded fetch here killed the bot after login with a bare "Unknown Channel" - no variable
+    // named, no remedy - when a pinned panel channel had been deleted. resolveGuildChannel now
+    // refuses earlier with a proper message, so this should be unreachable; it says the same thing
+    // rather than trusting that.
+    const panel = await this.client.channels.fetch(this.ids.panelChannelId).catch(() => null)
+    if (!panel) throw new Error(`The ticket panel channel ${this.ids.panelChannelId} does not exist in `
+      + `${this.guild.name}. If DISCORD_PANEL_CHANNEL_ID is set in .env, correct it or remove it and `
+      + 'Heimdall will provision one.')
     if (!panel?.isTextBased()) throw new Error(`Panel channel ${this.ids.panelChannelId} is not a text channel. Clear DISCORD_PANEL_CHANNEL_ID to let the bot provision one.`)
     const existingId = await this.repository.getSetting('discord.panel_message_id')
     if (existingId) {
@@ -408,7 +547,7 @@ export class HeimdallService {
   overwrites(ticket) {
     const entries = [
       { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-      { id: this.config.botRoleId, allow: ADMIN_PERMISSIONS },
+      { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
       { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
     ]
     // The author keeps access only while the ticket is live. Once it is closed the channel
@@ -481,30 +620,14 @@ export class HeimdallService {
 
   // One pinned message that answers "what is waiting, and for how long" without opening anything.
 
+  // Resolution only. The channel is provisioned in provisionGuildLayout so the preflight can see it;
+  // creating it here meant it did not exist yet on the run that most needed checking.
   async queueBoardChannel() {
-    const stored = await this.repository.getSetting('discord.queue_channel_id')
-    if (stored) {
-      const existing = await this.client.channels.fetch(stored).catch(() => null)
-      if (existing) return existing
-      this.logger.warn(`Stored queue board channel ${stored} no longer exists in Discord; creating a replacement.`)
-    }
-    const channel = await this.guild.channels.create({
-      name: 'ticket-queue',
-      type: ChannelType.GuildText,
-      topic: 'Open tickets, oldest first. Updated automatically.',
-      // Staff only, denied to everyone else from the moment it exists. A player must never see
-      // which tickets are unclaimed and how long they have been ignored.
-      permissionOverwrites: [
-        { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: this.config.botRoleId, allow: ADMIN_PERMISSIONS },
-        { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
-        { id: this.config.moderatorRoleId, allow: STAFF_PERMISSIONS },
-        { id: this.config.gmRoleId, allow: STAFF_PERMISSIONS },
-      ],
-      reason: 'mod-heimdall queue board',
-    })
-    await this.repository.setSetting('discord.queue_channel_id', channel.id)
-    this.logger.info(`Created ticket queue channel (${channel.id}).`)
+    const id = this.ids?.queueChannelId ?? await this.repository.getSetting('discord.queue_channel_id')
+    if (!id) return null
+    const channel = await this.client.channels.fetch(id).catch(() => null)
+    if (!channel) this.logger.warn(`The ticket queue channel (${id}) could not be fetched. `
+      + 'The queue board cannot be drawn until it is back; restart to have it recreated.')
     return channel
   }
 
@@ -537,6 +660,7 @@ export class HeimdallService {
 
   async refreshQueueBoard() {
     const channel = await this.queueBoardChannel()
+    if (!channel) return null
     const rows = await this.repository.queueSnapshot()
     const embed = this.queueBoardEmbed(rows)
 
@@ -547,10 +671,30 @@ export class HeimdallService {
     } else {
       message = await channel.send({ embeds: [embed], allowedMentions: ALLOWED_MENTIONS })
       await this.repository.setSetting('discord.queue_message_id', message.id)
-      await message.pin('Ticket queue board').catch((error) => this.logger.warn(`Could not pin the queue board: ${error.message}`))
+      await this.pinWithRetry(message, 'Ticket queue board')
     }
     await this.nudgeUnclaimed(channel, rows)
     return message
+  }
+
+  // On the run that creates the queue channel, the pin is attempted before Discord has finished
+  // applying the channel's new overwrites, and fails with "Missing Permissions" - which is not true
+  // and reads alarmingly on a first install. It succeeds on the next start with nothing changed, so
+  // it is a propagation race rather than a permission fault. One retry is enough.
+  async pinWithRetry(message, reason) {
+    try {
+      await message.pin(reason)
+      return true
+    } catch (firstError) {
+      await new Promise((resolve) => { setTimeout(resolve, 2_000) })
+      try {
+        await message.pin(reason)
+        return true
+      } catch (error) {
+        this.logger.warn(`Could not pin the queue board: ${error.message} (first attempt: ${firstError.message})`)
+        return false
+      }
+    }
   }
 
   // Off unless an operator asks for it: an existing install should not start being pinged by a
@@ -1245,6 +1389,12 @@ export class HeimdallService {
     const staff = await this.requireRosteredStaff(interaction)
     if (ticket.source !== 'ingame' || ticket.claimant_discord_user_id !== interaction.user.id || ticket.claimant_gm_name !== staff.gm_name) throw new Error('Only the currently assigned staff member can reply to this player.')
 
+    // Discord closes an interaction after three seconds. A SOAP call that fails slowly used to blow
+    // that window, so the GM saw nothing at all at the exact moment something had gone wrong - the
+    // log showed the real error followed by "Unknown interaction". Deferring first means the reason
+    // always reaches them, however long the realm takes to refuse.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+
     // A forgotten logout should not be a dead end: bring the identity back rather than refusing.
     const wasOffline = (await this.identityState(ticket.realm_tag, staff.gm_name)) !== 'held'
     if (wasOffline) await this.setIdentityHeld(staff.gm_name, true, interaction.user.id)
@@ -1275,9 +1425,8 @@ export class HeimdallService {
     const arrival = context?.online
       ? `Delivering now — ${ticket.player_name} is online.`
       : `It will arrive when ${ticket.player_name} is online.`
-    return interaction.reply({
+    return interaction.editReply({
       content: `Sent as ${chunks.length} in-game message${chunks.length === 1 ? '' : 's'}. ${arrival}${note}`,
-      flags: MessageFlags.Ephemeral,
       allowedMentions: ALLOWED_MENTIONS,
     })
   }
@@ -1304,11 +1453,20 @@ export class HeimdallService {
   // command as "Console". This posts the missing half: what the bot ran and which Discord user
   // caused it, so an admin can correlate the two entries by timestamp.
   //
-  // Only posts if the audit channel already exists. The audit log is opt-in; a server that never
-  // enabled it must not acquire a channel because the bot issued a command.
+  // This used to pass create:false, on the reasoning that the audit log is opt-in and a server that
+  // never enabled it should not acquire a channel. The effect was the opposite of opt-in: the
+  // channel is only ever created by postCommandAudit, which runs only on a delivery job only the
+  // MODULE queues, and the module queues nothing unless Heimdall.CommandAuditEnabled is on - which
+  // is off by default. So on every default install the bot's own attribution could never post, ever,
+  // and said nothing about it.
+  //
+  // Two producers writing to one channel with different rights to create it is the bug. Both create
+  // it now. The two are not equivalent in scope, and this half is the one that always applies: it
+  // records what THIS BOT did to the realm, on behalf of a named Discord user, which is precisely
+  // what an admin needs when the realm's own log attributes it all to "Console".
   async attributeSoapCommand(command, causedBy) {
     try {
-      const channel = await this.auditChannel({ create: false })
+      const channel = await this.auditChannel({ create: true })
       if (!channel) return
       const who = causedBy ? `<@${causedBy}>` : 'an automatic action'
       await channel.send({
@@ -1537,7 +1695,7 @@ export class HeimdallService {
       // not be readable by the staff it holds to account.
       permissionOverwrites: [
         { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: this.config.botRoleId, allow: ADMIN_PERMISSIONS },
+        { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
         { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
       ],
       reason: 'mod-heimdall command audit',
@@ -1655,6 +1813,7 @@ ${chunk}\`\`\``,
     if (command === 'staff-add') {
       const user = interaction.options.getUser('user', true)
       const gmName = validateGmName(interaction.options.getString('gm_name', true))
+      await this.assertConfiguredIdentity(gmName)
       await this.repository.upsertStaff(user.id, gmName)
       const joined = await this.addStaffToOpenThreads(user.id)
       return interaction.reply({
@@ -1690,6 +1849,32 @@ ${chunk}\`\`\``,
       if (channel) await this.refreshVisibility(channel, ticket)
       return interaction.reply({ content: `${ticket.public_key} assigned to ${user} as ${mapping.gm_name}.`, flags: MessageFlags.Ephemeral, allowedMentions: { users: [user.id], roles: [], repliedUser: false } })
     }
+  }
+
+  // validateGmName is a format check, so "Spikeplay" for "Spikebot" was accepted here and surfaced
+  // much later as a SOAP refusal - to a GM, mid-conversation with a player. The module knows the
+  // real list, because it resolves each configured name against the realm at startup and discards
+  // the ones that are not usable characters; it publishes what survived. This moves the discovery
+  // from mid-conversation to the moment the mistake is made.
+  //
+  // A missing list means the module has not restarted since the upgrade that started publishing it.
+  // That must warn rather than block, or every staff-add on a half-upgraded install fails.
+  async assertConfiguredIdentity(gmName) {
+    const names = await this.repository.gmIdentityNames()
+    if (names === null) {
+      this.logger.warn('The module has not published its GM identity list, so the GM name in '
+        + `/ticket staff-add could not be checked. Restart the worldserver to enable this check.`)
+      return
+    }
+    if (names.some((name) => name.toLowerCase() === gmName.toLowerCase())) return
+    if (!names.length) {
+      throw new Error('No GM identities are configured on the realm, so there is no name to map to. '
+        + 'Set Heimdall.GmIdentities in heimdall.conf to a real character on this realm and restart '
+        + 'the worldserver, then run this again.')
+    }
+    throw new Error(`"${gmName}" is not a configured GM identity. The realm accepts: ${names.join(', ')}. `
+      + 'Check the spelling, or add the name to Heimdall.GmIdentities in heimdall.conf and restart '
+      + 'the worldserver.')
   }
 
   async failInteraction(interaction, error) {

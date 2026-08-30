@@ -1,8 +1,19 @@
 # Configuration reference
 
-`DISCORD_TOKEN`, guild/role/channel IDs, MySQL values, SOAP values, archive
-path, and `BOT_INSTANCE_ID` are required. The exact variables and safe sample
-values are in `.env.example`.
+`DISCORD_TOKEN`, the guild ID, the three staff role IDs, MySQL values, SOAP
+values, archive path, and `BOT_INSTANCE_ID` are required. The exact variables and
+safe sample values are in `.env.example`.
+
+`DISCORD_BOT_ROLE_ID` is **not** required and is best left unset. The bot's role
+is the managed one Discord creates for the application, which is the only role a
+bot can be in; Heimdall looks it up. If you do set it, it must be that role's id —
+the bot verifies it is actually a member and refuses to start otherwise, before
+provisioning anything, because provisioning against a role it is not in produces
+channels it can neither read nor repair.
+
+- `DISCORD_SUPPORT_CATEGORY_NAME`: the category Heimdall creates for its own panel
+  and queue board; default `Heimdall Support`. Useful if you already have a support
+  structure you want these to sit in.
 
 - `ARCHIVE_MAX_ATTACHMENT_BYTES`: maximum downloaded attachment size; default 10 MiB.
 - `TRANSCRIPT_RETENTION_DAYS`: detailed transcript/attachment retention; default 180.

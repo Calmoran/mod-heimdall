@@ -67,8 +67,13 @@ async function main() {
   out.push('-'.repeat(60))
   say('guild id', config.guildId)
   say('discord token', mask(config.token))
-  say('admin / mod / gm / bot role', [config.adminRoleId, config.moderatorRoleId, config.gmRoleId, config.botRoleId].join(' '))
-  say('panel / open / claimed', [config.panelChannelId ?? 'auto', config.openCategoryId ?? 'auto', config.claimedCategoryId ?? 'auto'].join(' '))
+  say('admin / mod / gm role', [config.adminRoleId, config.moderatorRoleId, config.gmRoleId].join(' '))
+  // "auto" is the recommended state: the bot's role is the managed one Discord made, which it finds
+  // itself. A value here is an override and is verified at startup.
+  say('bot role', config.botRoleId ?? 'auto (managed role)')
+  say('panel / queue', [config.panelChannelId ?? 'auto', config.queueChannelId ?? 'auto'].join(' '))
+  say('open / claimed / closed', [config.openCategoryId ?? 'auto', config.claimedCategoryId ?? 'auto', config.closedCategoryId ?? 'auto'].join(' '))
+  say('support category', `${config.supportCategoryId ?? 'auto'} (${config.supportCategoryName})`)
   say('mysql', `${config.mysql.user}@${config.mysql.host}:${config.mysql.port}/${config.mysql.database}`)
   say('mysql password', mask(config.mysql.password))
   say('soap url', config.soap.url)
