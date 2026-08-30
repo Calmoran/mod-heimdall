@@ -65,8 +65,23 @@ could check and how many it expected, and **stops** if a permission it cannot wo
 missing, naming each one and where. It does not start half-working: a ticket system that runs while
 unable to see ticket channels tells players they have reached someone when nobody comes.
 
-Create or retain three guild roles: **Admin, Moderator and Game Master**. Copy their IDs into the
-environment file.
+Decide which of your existing roles work tickets. **Role names do not matter** — Heimdall reads
+IDs, and your roles can be called anything; you do not need to create roles named for our variables
+(that instinct is exactly what used to brick installs — see Troubleshooting in the module guide).
+
+Two lists in the environment file:
+
+- `DISCORD_STAFF_ROLE_IDS` — comma-separated, required. These roles can see unclaimed tickets and
+  claim, reply, and close their own.
+- `DISCORD_ADMIN_ROLE_IDS` — optional. These can additionally manage the staff roster, reassign and
+  reopen tickets, and close or drive the GM identity on a ticket claimed by someone else. **Leave it
+  empty** and anyone with Discord's own Manage Server permission is the admin tier — a small server
+  configures exactly one role variable and is done. (With it empty, admin-only channels such as the
+  command audit are visible only to members with the Administrator permission.)
+
+Installs configured before these lists existed keep working: the old
+`DISCORD_ADMIN_ROLE_ID`, `DISCORD_MODERATOR_ROLE_ID` and `DISCORD_GM_ROLE_ID` are still read and
+folded in.
 
 **Do not create a role for the bot.** Discord creates one automatically when you invite the
 application — a *managed* role named after it, which you cannot delete and cannot add anyone to. That

@@ -67,7 +67,8 @@ async function main() {
   out.push('-'.repeat(60))
   say('guild id', config.guildId)
   say('discord token', mask(config.token))
-  say('admin / mod / gm role', [config.adminRoleId, config.moderatorRoleId, config.gmRoleId].join(' '))
+  say('staff roles', config.staffRoleIds.join(' '))
+  say('admin roles', config.adminRoleIds.length ? config.adminRoleIds.join(' ') : 'none (Manage Server permission is the admin tier)')
   // "auto" is the recommended state: the bot's role is the managed one Discord made, which it finds
   // itself. A value here is an override and is verified at startup.
   say('bot role', config.botRoleId ?? 'auto (managed role)')

@@ -6,8 +6,7 @@ import path from 'node:path'
 // asking for it beside three ids they do create invited exactly the mistake that bricked an install.
 // The bot finds its own; setting it is optional and is verified properly when it is set.
 const required = [
-  'DISCORD_TOKEN', 'DISCORD_GUILD_ID', 'DISCORD_ADMIN_ROLE_ID', 'DISCORD_MODERATOR_ROLE_ID',
-  'DISCORD_GM_ROLE_ID', 'MYSQL_HOST', 'MYSQL_DATABASE',
+  'DISCORD_TOKEN', 'DISCORD_GUILD_ID', 'MYSQL_HOST', 'MYSQL_DATABASE',
   'MYSQL_USER', 'MYSQL_PASSWORD', 'SOAP_URL', 'SOAP_USER', 'SOAP_PASSWORD', 'ARCHIVE_DIR', 'BOT_INSTANCE_ID',
 ]
 
@@ -58,6 +57,12 @@ function optionalId(value) {
   return trimmed
 }
 
+// A comma-separated list of role ids. Order is preserved and duplicates within one list are
+// dropped, so a pasted id cannot silently count twice.
+function roleIdList(value) {
+  return [...new Set((value ?? '').split(',').map((entry) => optionalId(entry)).filter(Boolean))]
+}
+
 // The instance lock and the delivery leases are owned by the PROCESS, not by the configuration.
 // An id taken straight from BOT_INSTANCE_ID could not see the likeliest accident: two copies
 // started from one .env share that value, so the second read the lock row, found its own name
@@ -79,12 +84,33 @@ export function loadConfig(env = process.env) {
   const missing = required.filter((key) => !env[key] || env[key].startsWith('replace_with_'))
   if (missing.length) throw new Error(`Missing required environment values: ${missing.join(', ')}`)
   const archiveDir = path.resolve(env.ARCHIVE_DIR)
+
+  // Two lists replaced three fixed roles. Moderator and GM were treated identically at every call
+  // site - two tiers wearing three names - and a server with one staff tier could not express
+  // itself: putting one id in all three variables would have handed Discord a channel-overwrite
+  // array with duplicate targets, which it rejects. The three old singular variables are still
+  // read and folded in, so an install that predates the lists upgrades untouched.
+  const staffRoleIds = [...new Set([
+    ...roleIdList(env.DISCORD_STAFF_ROLE_IDS),
+    optionalId(env.DISCORD_MODERATOR_ROLE_ID),
+    optionalId(env.DISCORD_GM_ROLE_ID),
+  ].filter(Boolean))]
+  // Empty is allowed and means: anyone with Discord's own Manage Server permission administers the
+  // roster. A one-tier server configures exactly one variable and is done.
+  const adminRoleIds = [...new Set([
+    ...roleIdList(env.DISCORD_ADMIN_ROLE_IDS),
+    optionalId(env.DISCORD_ADMIN_ROLE_ID),
+  ].filter(Boolean))]
+  if (!staffRoleIds.length) {
+    throw new Error('DISCORD_STAFF_ROLE_IDS must name at least one role that can answer tickets '
+      + '(comma-separated role ids; the legacy DISCORD_MODERATOR_ROLE_ID / DISCORD_GM_ROLE_ID are '
+      + 'also still read).')
+  }
   return Object.freeze({
     token: env.DISCORD_TOKEN,
     guildId: env.DISCORD_GUILD_ID,
-    adminRoleId: env.DISCORD_ADMIN_ROLE_ID,
-    moderatorRoleId: env.DISCORD_MODERATOR_ROLE_ID,
-    gmRoleId: env.DISCORD_GM_ROLE_ID,
+    staffRoleIds,
+    adminRoleIds,
     botRoleId: optionalId(env.DISCORD_BOT_ROLE_ID),
     panelChannelId: optionalId(env.DISCORD_PANEL_CHANNEL_ID),
     openCategoryId: optionalId(env.DISCORD_OPEN_CATEGORY_ID),

@@ -78,7 +78,7 @@ export const REQUIRED_PERMISSIONS = [
 // rather than left showing buttons that no longer route anywhere.
 const PANEL_VERSION = '2'
 const STAFF_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-const ADMIN_PERMISSIONS = [...STAFF_PERMISSIONS, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages]
+export const ADMIN_PERMISSIONS = [...STAFF_PERMISSIONS, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages]
 
 function ticketIdFrom(customId) {
   const value = Number.parseInt(customId.split(':').at(-1), 10)
@@ -274,20 +274,27 @@ export class HeimdallService {
   // Fetching roles also populates the cache that PermissionOverwrites.resolve reads.
   async verifyConfiguredRoles() {
     const roles = await this.guild.roles.fetch()
-    const configured = {
-      DISCORD_ADMIN_ROLE_ID: this.config.adminRoleId,
-      DISCORD_MODERATOR_ROLE_ID: this.config.moderatorRoleId,
-      DISCORD_GM_ROLE_ID: this.config.gmRoleId,
-    }
     // DISCORD_BOT_ROLE_ID is deliberately absent: it is optional now, and verifyBotRole checks it
     // properly - that the bot is actually IN it, which resolving the id alone never proved.
-    const bad = Object.entries(configured)
+    const configured = [
+      ...this.config.staffRoleIds.map((id) => ['DISCORD_STAFF_ROLE_IDS', id]),
+      ...this.config.adminRoleIds.map((id) => ['DISCORD_ADMIN_ROLE_IDS', id]),
+    ]
+    const bad = configured
       .filter(([, id]) => !roles.get(id))
-      .map(([name, id]) => `${name} (${JSON.stringify(id)})`)
+      .map(([name, id]) => `${name} entry ${JSON.stringify(id)}`)
     if (bad.length) {
       throw new Error(`These role IDs do not match any role in guild ${this.guild.name}: ${bad.join(', ')}. `
         + 'Check for stray characters and confirm each is a role ID, not a channel or user ID.')
     }
+
+    // Both counts, always: a typo in a comma-separated list drops entries silently at the parse,
+    // and "the bot works but half my staff cannot see tickets" is this line's job to prevent.
+    this.logger.info(`Roles resolved: ${this.config.adminRoleIds.length} admin role(s), `
+      + `${this.config.staffRoleIds.length} staff role(s).`
+      + (this.config.adminRoleIds.length ? '' : ' No admin role is configured, so ticket administration '
+        + 'falls back to Discord\'s Manage Server permission, and admin-only channels are visible only '
+        + 'to members with the Administrator permission.'))
   }
 
   // Reduces a new install's Discord configuration to a token and a guild ID. Anything not
@@ -363,9 +370,7 @@ export class HeimdallService {
           permissionOverwrites: [
             { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
             { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
-            { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
-            { id: this.config.moderatorRoleId, allow: STAFF_PERMISSIONS },
-            { id: this.config.gmRoleId, allow: STAFF_PERMISSIONS },
+            ...this.staffOverwriteEntries(),
           ],
           reason: 'mod-heimdall queue board',
         }),
@@ -380,9 +385,7 @@ export class HeimdallService {
     return [
       { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
       { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
-      { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
-      { id: this.config.moderatorRoleId, allow: STAFF_PERMISSIONS },
-      { id: this.config.gmRoleId, allow: STAFF_PERMISSIONS },
+      ...this.staffOverwriteEntries(),
     ]
   }
 
@@ -448,7 +451,36 @@ export class HeimdallService {
   }
 
   isAdmin(interaction) {
-    return actorRoles(interaction).includes(this.config.adminRoleId)
+    if (this.config.adminRoleIds.length) {
+      const roles = actorRoles(interaction)
+      return this.config.adminRoleIds.some((id) => roles.includes(id))
+    }
+    // No admin role configured: Discord's own Manage Server permission is the admin tier. Anyone
+    // who can administer the guild can administer the roster - no configuration, and it matches
+    // how most bots behave.
+    return Boolean(interaction.memberPermissions?.has?.(PermissionFlagsBits.ManageGuild))
+  }
+
+  // One overwrite entry per role, whatever the lists say. A role in both lists gets admin
+  // permissions and appears ONCE - Discord rejects an overwrite array with duplicate targets, which
+  // is exactly what the old "set all three variables to the same id" workaround would have built.
+  staffOverwriteEntries() {
+    const admin = new Set(this.config.adminRoleIds)
+    return [
+      ...this.config.adminRoleIds.map((id) => ({ id, allow: ADMIN_PERMISSIONS })),
+      ...this.config.staffRoleIds.filter((id) => !admin.has(id)).map((id) => ({ id, allow: STAFF_PERMISSIONS })),
+    ]
+  }
+
+  // Who to address when something needs a human with authority: the admin roles when any are
+  // configured, otherwise the staff roles - a mention must land on someone, and a Discord
+  // permission cannot be mentioned.
+  escalationRoleIds() {
+    return this.config.adminRoleIds.length ? this.config.adminRoleIds : this.config.staffRoleIds
+  }
+
+  roleMentions(ids) {
+    return ids.map((id) => `<@&${id}>`).join(' ')
   }
 
   canWork(interaction) {
@@ -552,7 +584,7 @@ export class HeimdallService {
     const entries = [
       { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
       { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
-      { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
+      ...this.config.adminRoleIds.map((id) => ({ id, allow: ADMIN_PERMISSIONS })),
     ]
     // The author keeps access only while the ticket is live. Once it is closed the channel
     // disappears for them: a closed ticket is not a place to keep talking, and the transcript is
@@ -564,8 +596,10 @@ export class HeimdallService {
     if (ticket.status !== 'open' && ticket.claimant_discord_user_id) {
       entries.push({ id: ticket.claimant_discord_user_id, allow: STAFF_PERMISSIONS })
     } else {
-      entries.push({ id: this.config.moderatorRoleId, allow: STAFF_PERMISSIONS })
-      entries.push({ id: this.config.gmRoleId, allow: STAFF_PERMISSIONS })
+      const admin = new Set(this.config.adminRoleIds)
+      for (const id of this.config.staffRoleIds.filter((roleId) => !admin.has(roleId))) {
+        entries.push({ id, allow: STAFF_PERMISSIONS })
+      }
     }
     return entries
   }
@@ -710,8 +744,8 @@ export class HeimdallService {
       if (!row.never_claimed || row.unclaimed_seconds < minutes * 60) continue
       if (await this.repository.hasAudit(row.id, 'queue_nudge')) continue
       await channel.send({
-        content: `<@&${this.config.gmRoleId}> \`${row.public_key}\` has been unclaimed for ${this.formatDuration(row.unclaimed_seconds)}.`,
-        allowedMentions: { parse: [], roles: [this.config.gmRoleId], repliedUser: false },
+        content: `${this.roleMentions(this.config.staffRoleIds)} \`${row.public_key}\` has been unclaimed for ${this.formatDuration(row.unclaimed_seconds)}.`,
+        allowedMentions: { parse: [], roles: this.config.staffRoleIds, repliedUser: false },
       })
       // Recorded only once the mention is out. Recorded first, a failed send would mark the ticket
       // nudged and nobody would ever be told.
@@ -765,11 +799,18 @@ export class HeimdallService {
     // which is why the administrator fallback does not read the member list.
     //
     // The message is staff-side by construction - a private thread the ticket's author is not in.
+    // The mention is also the join mechanism, so it must land on real roles. With no admin role
+    // configured there is no way to mention "whoever has Manage Server" - a permission cannot be
+    // mentioned - so the staff roles are addressed instead: their members get added to the thread
+    // and the message says who has to act.
+    const fallbackRoles = this.escalationRoleIds()
+    const instruction = this.config.adminRoleIds.length
+      ? 'You have been added as administrators. Run `/ticket staff-add` to roster the staff who should be handling tickets.'
+      : 'No admin role is configured, so someone with the Manage Server permission must run `/ticket staff-add` to roster the staff who should be handling tickets.'
     const notice = await thread.send({
-      content: `<@&${this.config.adminRoleId}> Nobody is on the Heimdall staff roster, so this ticket had `
-        + 'no one to add. You have been added as administrators. Run `/ticket staff-add` to roster the '
-        + 'staff who should be handling tickets.',
-      allowedMentions: { parse: [], roles: [this.config.adminRoleId], repliedUser: false },
+      content: `${this.roleMentions(fallbackRoles)} Nobody is on the Heimdall staff roster, so this ticket had `
+        + `no one to add. ${instruction}`,
+      allowedMentions: { parse: [], roles: fallbackRoles, repliedUser: false },
     })
 
     // Discord sets this flag when it could not add some of the mentioned role's members.
@@ -1175,10 +1216,10 @@ export class HeimdallService {
       // Somebody other than the clicker has to be able to see this, or the button is theatre.
       const audience = ticket.claimant_discord_user_id
         ? `<@${ticket.claimant_discord_user_id}>`
-        : `<@&${this.config.adminRoleId}>`
+        : this.roleMentions(this.escalationRoleIds())
       const mentions = ticket.claimant_discord_user_id
         ? { users: [ticket.claimant_discord_user_id], roles: [], repliedUser: false }
-        : { users: [], roles: [this.config.adminRoleId], repliedUser: false }
+        : { users: [], roles: this.escalationRoleIds(), repliedUser: false }
       const closureThread = await this.staffThreadFor(interaction, ticket)
       await closureThread.send({
         content: `${audience} — <@${interaction.user.id}> has requested that this ticket be closed.`,
@@ -1716,7 +1757,7 @@ export class HeimdallService {
       permissionOverwrites: [
         { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
         { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
-        { id: this.config.adminRoleId, allow: ADMIN_PERMISSIONS },
+        ...this.config.adminRoleIds.map((id) => ({ id, allow: ADMIN_PERMISSIONS })),
       ],
       reason: 'mod-heimdall command audit',
     })

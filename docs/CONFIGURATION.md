@@ -1,8 +1,30 @@
 # Configuration reference
 
-`DISCORD_TOKEN`, the guild ID, the three staff role IDs, MySQL values, SOAP
+`DISCORD_TOKEN`, the guild ID, `DISCORD_STAFF_ROLE_IDS`, MySQL values, SOAP
 values, archive path, and `BOT_INSTANCE_ID` are required. The exact variables and
 safe sample values are in `.env.example`.
+
+Roles are configured as two comma-separated ID lists — names never matter:
+
+- `DISCORD_STAFF_ROLE_IDS` (required, one or many): can answer tickets — see
+  unclaimed ones, claim, reply, and close their own.
+- `DISCORD_ADMIN_ROLE_IDS` (optional): everything staff can do, plus manage the
+  roster, reassign, reopen, and act on tickets claimed by someone else. Empty
+  means Discord's Manage Server permission is the admin tier; note that admin-only
+  channels are then visible only to members with the Administrator permission,
+  since a permission cannot be named in a channel overwrite.
+
+A role in both lists counts once, as admin. The startup log reports how many of
+each resolved ("Roles resolved: 1 admin role(s), 3 staff role(s)"), so a typo in
+a list shows up as a short count rather than as half your staff quietly locked
+out. The legacy `DISCORD_ADMIN_ROLE_ID`, `DISCORD_MODERATOR_ROLE_ID` and
+`DISCORD_GM_ROLE_ID` are still read and merged in, so an existing install
+upgrades untouched.
+
+Pings follow the tiers: queue nudges mention the staff roles; the empty-roster
+fallback and closure-request escalations mention the admin roles, or the staff
+roles when no admin role is configured — a mention has to land on someone, and a
+permission cannot be mentioned.
 
 `DISCORD_BOT_ROLE_ID` is **not** required and is best left unset. The bot's role
 is the managed one Discord creates for the application, which is the only role a

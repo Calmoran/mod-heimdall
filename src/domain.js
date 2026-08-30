@@ -338,5 +338,6 @@ export function archiveExpiry(closedAt, days = 180) {
 
 export function memberCanWorkTicket(memberRoleIds, config) {
   const roles = new Set(memberRoleIds)
-  return roles.has(config.adminRoleId) || roles.has(config.moderatorRoleId) || roles.has(config.gmRoleId)
+  // Admins can always work tickets; the admin tier adds authority, it never removes capability.
+  return config.staffRoleIds.some((id) => roles.has(id)) || config.adminRoleIds.some((id) => roles.has(id))
 }

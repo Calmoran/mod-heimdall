@@ -6,8 +6,8 @@ import test from 'node:test'
 
 import { PermissionFlagsBits } from 'discord.js'
 
-import { HeimdallService, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
-import { deriveRunId } from '../src/config.js'
+import { ADMIN_PERMISSIONS, HeimdallService, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
+import { deriveRunId, loadConfig } from '../src/config.js'
 import { Logger } from '../src/logger.js'
 import { TicketRepository } from '../src/repository.js'
 import {
@@ -78,8 +78,9 @@ test('ticket transitions reject unsafe lifecycle jumps', () => {
 })
 
 test('only configured staff roles can work tickets', () => {
-  const config = { adminRoleId: 'a', moderatorRoleId: 'm', gmRoleId: 'g' }
+  const config = { adminRoleIds: ['a'], staffRoleIds: ['m', 'g'] }
   assert.equal(memberCanWorkTicket(['m'], config), true)
+  assert.equal(memberCanWorkTicket(['a'], config), true, 'an admin lost the ability to work tickets')
   assert.equal(memberCanWorkTicket(['player'], config), false)
 })
 
@@ -295,7 +296,7 @@ function adminService() {
   const channel = { setParent: async () => {}, permissionOverwrites: { set: async () => {} } }
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
-  service.config = { adminRoleId: 'role-admin', moderatorRoleId: 'role-mod', gmRoleId: 'role-gm', botRoleId: 'role-bot' }
+  service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-mod', 'role-gm'] }
   service.ids = { openCategoryId: 'cat-open', claimedCategoryId: 'cat-claimed', closedCategoryId: 'cat-closed' }
   service.guild = {
     roles: { everyone: { id: 'everyone' } },
@@ -487,7 +488,7 @@ function replyService(online) {
   const sent = []
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
-  service.config = { adminRoleId: 'role-admin', moderatorRoleId: 'role-mod', gmRoleId: 'role-gm' }
+  service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-mod', 'role-gm'] }
   service.repository = {
     staff: async () => ({ gm_name: 'Helpbot' }),
     getSetting: async () => 'held',
@@ -543,7 +544,7 @@ test('a deleted audit channel is recreated instead of silently dropping entries'
   const board = []
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: (line) => warnings.push(line), info: () => {} }
-  service.config = { botRoleId: 'role-bot', adminRoleId: 'role-admin', commandAuditChannel: true }
+  service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-mod'], commandAuditChannel: true }
   service.botRoleId = 'role-bot'
   service.guild = {
     roles: { everyone: { id: 'everyone' } },
@@ -824,4 +825,109 @@ test('both closure routes run the same Discord side effects', () => {
   const body = source.slice(source.indexOf('async applyClosureToDiscord'))
   assert.ok(body.includes('delete_channel'), 'the retention clock left the shared path')
   assert.ok(body.includes('refreshVisibility'), 'the category move left the shared path')
+})
+
+// Finding 41's shapes. Channel creation is where duplicate overwrite targets would surface as a
+// Discord rejection, so every shape is asserted on the overwrite arrays it would send.
+function roleService(staffRoleIds, adminRoleIds) {
+  const service = Object.create(HeimdallService.prototype)
+  service.config = { staffRoleIds, adminRoleIds }
+  service.botRoleId = 'role-bot'
+  service.guild = { roles: { everyone: { id: 'everyone' } } }
+  return service
+}
+
+function assertNoDuplicateTargets(entries, label) {
+  const ids = entries.map((entry) => entry.id)
+  assert.equal(new Set(ids).size, ids.length, `${label} carries a duplicate overwrite target, which Discord rejects`)
+}
+
+test('one role in each list produces one admin and one staff overwrite', () => {
+  const service = roleService(['staff-1'], ['admin-1'])
+  const entries = service.staffOverwriteEntries()
+  assert.deepEqual(entries.map((entry) => entry.id), ['admin-1', 'staff-1'])
+  assertNoDuplicateTargets(service.categoryOverwrites(), 'categoryOverwrites')
+})
+
+test('the same role in both lists produces ONE overwrite, with admin permissions', () => {
+  // The old workaround - the same id in every variable - would have sent Discord duplicate
+  // targets. The lists must collapse it instead.
+  const service = roleService(['role-x', 'staff-2'], ['role-x'])
+  const entries = service.staffOverwriteEntries()
+  assert.deepEqual(entries.map((entry) => entry.id), ['role-x', 'staff-2'])
+  assert.equal(entries[0].allow, ADMIN_PERMISSIONS, 'the shared role was demoted to staff permissions')
+  assertNoDuplicateTargets(service.categoryOverwrites(), 'categoryOverwrites')
+
+  const ticket = { status: 'open', source: 'ingame', discord_creator_id: null, claimant_discord_user_id: null }
+  assertNoDuplicateTargets(service.overwrites(ticket), 'ticket overwrites')
+})
+
+test('many staff tiers all land in the overwrites and the unclaimed-ticket audience', () => {
+  const service = roleService(['t1', 't2', 't3', 't4', 't5'], ['boss'])
+  const ticket = { status: 'open', source: 'ingame', discord_creator_id: null, claimant_discord_user_id: null }
+  const ids = service.overwrites(ticket).map((entry) => entry.id)
+  for (const tier of ['t1', 't2', 't3', 't4', 't5']) assert.ok(ids.includes(tier), `${tier} cannot see unclaimed tickets`)
+  assertNoDuplicateTargets(service.overwrites(ticket), 'ticket overwrites')
+})
+
+test('an empty admin list falls back to the Manage Server permission', () => {
+  const service = roleService(['staff-1'], [])
+  const managers = { memberPermissions: { has: (flag) => flag === PermissionFlagsBits.ManageGuild } }
+  const mortals = { memberPermissions: { has: () => false }, member: { roles: { cache: new Map([['staff-1', {}]]) } } }
+  assert.equal(service.isAdmin(managers), true, 'a guild manager was refused ticket administration')
+  assert.equal(service.isAdmin(mortals), false, 'a staff member without Manage Server became an admin')
+  // And escalations still land on real, mentionable roles - a permission cannot be mentioned.
+  assert.deepEqual(service.escalationRoleIds(), ['staff-1'])
+})
+
+test('a configured admin role does not also grant admin to Manage Server holders', () => {
+  // The fallback exists only for the empty list. With a role configured, the role is the tier.
+  const service = roleService(['staff-1'], ['admin-1'])
+  const manager = { memberPermissions: { has: () => true }, member: { roles: { cache: new Map() } } }
+  assert.equal(service.isAdmin(manager), false)
+})
+
+test('the three legacy variables still configure an install untouched', () => {
+  const env = {
+    DISCORD_TOKEN: 't'.repeat(30), DISCORD_GUILD_ID: '1', BOT_INSTANCE_ID: 'legacy-install',
+    MYSQL_HOST: 'db', MYSQL_DATABASE: 'chars', MYSQL_USER: 'u', MYSQL_PASSWORD: 'p'.repeat(10),
+    SOAP_URL: 'http://127.0.0.1:7878/', SOAP_USER: 's', SOAP_PASSWORD: 'sp'.repeat(5),
+    ARCHIVE_DIR: './archive',
+    DISCORD_ADMIN_ROLE_ID: '111', DISCORD_MODERATOR_ROLE_ID: '222', DISCORD_GM_ROLE_ID: '333',
+  }
+  const config = loadConfig(env)
+  assert.deepEqual(config.adminRoleIds, ['111'])
+  assert.deepEqual(config.staffRoleIds, ['222', '333'])
+
+  // Mixing old and new merges rather than replaces, and duplicates collapse.
+  const mixed = loadConfig({ ...env, DISCORD_STAFF_ROLE_IDS: ' 444 , 222 ,, 555 ', DISCORD_ADMIN_ROLE_IDS: '111,666' })
+  assert.deepEqual(mixed.staffRoleIds, ['444', '222', '555', '333'])
+  assert.deepEqual(mixed.adminRoleIds, ['111', '666'])
+
+  // No staff source at all is refused, naming the variable to set.
+  const bare = { ...env }
+  delete bare.DISCORD_ADMIN_ROLE_ID; delete bare.DISCORD_MODERATOR_ROLE_ID; delete bare.DISCORD_GM_ROLE_ID
+  assert.throws(() => loadConfig(bare), /DISCORD_STAFF_ROLE_IDS must name at least one role/)
+  // And an admin-only install still needs a staff list - admins are also staff, but the variable
+  // that says who answers tickets is the staff list.
+  assert.throws(() => loadConfig({ ...bare, DISCORD_ADMIN_ROLE_IDS: '111' }), /DISCORD_STAFF_ROLE_IDS/)
+})
+
+test('the empty-roster fallback without an admin role still lands on someone', async () => {
+  const sent = []
+  const service = roleService(['staff-1', 'staff-2'], [])
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = {
+    getThreadId: async () => null,
+    setThreadId: async () => {},
+    activeStaffIds: async () => [],
+  }
+  const thread = { send: async (payload) => { sent.push(payload); return { flags: { bitfield: 0 } } } }
+  const channel = { threads: { create: async () => thread } }
+  await service.ensureStaffThread(channel, { id: 1, public_key: 'R1-1' })
+
+  assert.equal(sent.length, 1, 'nobody was told the roster is empty')
+  assert.match(sent[0].content, /<@&staff-1> <@&staff-2>/, 'the staff roles were not mentioned, so nobody joined the thread')
+  assert.match(sent[0].content, /Manage Server permission/, 'the message does not say who can fix it')
+  assert.deepEqual(sent[0].allowedMentions.roles, ['staff-1', 'staff-2'])
 })

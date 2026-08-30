@@ -10,6 +10,12 @@ First public release.
 
 ### What an operator gets
 
+- **Roles are two ID lists, not three fixed names.** `DISCORD_STAFF_ROLE_IDS` (who answers
+  tickets, one or many tiers) and `DISCORD_ADMIN_ROLE_IDS` (who manages the roster and overrides,
+  optional — empty means Discord's Manage Server permission is the admin tier). Role names never
+  matter. A role in both lists counts once, as admin, and the startup line reports how many of each
+  resolved. The legacy `DISCORD_ADMIN_ROLE_ID` / `DISCORD_MODERATOR_ROLE_ID` / `DISCORD_GM_ROLE_ID`
+  are still read and merged in — an existing install upgrades untouched.
 - **Zero-configuration Discord layout.** On first run the bot provisions everything it needs — a
   support category holding the ticket panel and the staff queue board, plus Open, Claimed and
   Closed ticket categories — appended to the end of the channel list, remembered across restarts,
