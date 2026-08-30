@@ -1061,7 +1061,8 @@ test('the GM menu drives the same commands the buttons did, and kick is last', a
     svc.identityState = async () => 'offline'
     return svc.controls({ id: 5, source: 'ingame', player_name: 'Dustpaw', claimant_discord_user_id: null, realm_tag: 'R1' })
   })()
-  const menu = rows[1].components[0].toJSON()
+  // The dropdown is the last row, below the buttons and the player-card utilities.
+  const menu = rows[2].components[0].toJSON()
   assert.equal(menu.options.at(-1).value, 'kick')
   assert.equal(menu.options.length, 5)
 })

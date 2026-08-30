@@ -30,10 +30,10 @@ First public release.
   staff-only channel — header, player card, account notes, controls and discussion in one place.
   Discord-opened tickets keep a private staff thread, because the reporter shares that channel and
   must not see staff content.
-- **Consolidated controls**: three rows — Claim / Reply / Close / a login-logout toggle that acts on
-  the identity's actual current state / Add Note; one GM-actions menu (revive, unstuck, stop
-  combat, teleport, kick last — it disconnects); Reopen and player-card utilities. Two rows of
-  headroom against Discord's five-row ceiling.
+- **Consolidated controls**: three rows — Claim / Reply / a login-logout toggle that acts on the
+  identity's actual current state / Close; then Reopen Ticket and the player-card utilities; then
+  one GM-actions menu (revive, unstuck, stop combat, teleport, kick last). Two rows of headroom
+  against Discord's five-row ceiling.
 - **A staff roster mapped to GM identities**, validated against the names the realm actually
   accepted, so a typo is refused at `/ticket staff-add` rather than failing mid-conversation.
 - **Durable delivery.** Replies, closures and GM actions ride a keyed, leased job queue: nothing is

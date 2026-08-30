@@ -632,18 +632,18 @@ export class HeimdallService {
       ? (await this.identityState(ticket.realm_tag, ticket.claimant_gm_name)) === 'held'
       : false
 
+    // Reading order is the working order: claim it, talk to the player, be in the game, close it.
     const buttons = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`ticket:claim:${ticket.id}`).setLabel('Claim').setStyle(ButtonStyle.Success),
       // Disabled while unclaimed: replying requires an assigned GM, and finding that out only
       // after typing a whole message is a poor way to learn it.
       new ButtonBuilder().setCustomId(`ticket:reply:${ticket.id}`).setLabel('Reply to Player').setStyle(ButtonStyle.Primary)
         .setDisabled(!ingame || !claimed),
-      new ButtonBuilder().setCustomId(`ticket:close:${ticket.id}`).setLabel('Close').setStyle(ButtonStyle.Danger),
       new ButtonBuilder().setCustomId(`ticket:identity-toggle:${ticket.id}`)
         .setLabel(held ? 'Log Out Of Game' : 'Log In To Game')
         .setStyle(held ? ButtonStyle.Secondary : ButtonStyle.Success)
         .setDisabled(!ingame || !claimed),
-      new ButtonBuilder().setCustomId(`ticket:note:${ticket.id}`).setLabel('Add Note').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId(`ticket:close:${ticket.id}`).setLabel('Close').setStyle(ButtonStyle.Danger),
     )
 
     // Kick is deliberately last: it disconnects the player, and the menu order is the reading
@@ -656,17 +656,19 @@ export class HeimdallService {
         .addOptions(['revive', 'unstuck', 'combatstop', 'teleport', 'kick'].map((key) => ({
           label: GM_ACTIONS[key].label,
           value: key,
-          description: key === 'kick' ? 'Disconnects the player from the realm.' : undefined,
         }))),
     )
 
     const utility = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`ticket:reopen:${ticket.id}`).setLabel('Reopen').setStyle(ButtonStyle.Secondary),
+      // "Reopen Ticket", not "Reopen" - it sits beside player-card controls, and the label should
+      // say what is being reopened.
+      new ButtonBuilder().setCustomId(`ticket:reopen:${ticket.id}`).setLabel('Reopen Ticket').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`ticket:refresh-context:${ticket.id}`).setLabel('Refresh Player Info').setStyle(ButtonStyle.Secondary).setDisabled(!ingame),
+      new ButtonBuilder().setCustomId(`ticket:note:${ticket.id}`).setLabel('Add Note').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId(`ticket:remove-note:${ticket.id}`).setLabel('Remove Note').setStyle(ButtonStyle.Secondary).setDisabled(!ingame),
     )
 
-    return [buttons, actions, utility]
+    return [buttons, utility, actions]
   }
 
   // One pinned message that answers "what is waiting, and for how long" without opening anything.

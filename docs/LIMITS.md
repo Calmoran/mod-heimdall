@@ -13,8 +13,8 @@ header, player card, controls and discussion, no thread. A Discord-opened ticket
 the channel, so everything staff-facing lives in a private thread they cannot see. Do not move staff
 discussion of a Discord ticket into its channel; the reporter reads it.
 
-The ticket header carries three rows of controls (buttons, the GM action menu, utilities) against
-Discord's ceiling of five rows per message — two rows of headroom.
+The ticket header carries three rows of controls (the working buttons, the player-card utilities,
+then the GM action menu) against Discord's ceiling of five rows per message — two rows of headroom.
 
 **AzerothCore allows one open ticket per player, not Heimdall.** A player with an open in-game ticket
 cannot file another until it is closed. This is the core's own rule, enforced in `GetTicketByPlayer`,
