@@ -1514,6 +1514,19 @@ export class HeimdallService {
     if (closed.source === 'ingame') {
       await this.repository.enqueue({ ticketId: closed.id, direction: 'soap', kind: 'close_ticket', payload: { sourceTicketId: closed.source_ticket_id, causedBy: actorId }, uniqueParts: ['close', idempotencyKey] })
     }
+    await this.applyClosureToDiscord(closed, { channel, playerNotice })
+    return closed
+  }
+
+  // Everything that happens to Discord when a ticket ends, in one place, because there are two ways
+  // a ticket can end and they must not drift apart. performClose owns the database transition and
+  // the SOAP command; a closure that started in game needs neither - the realm has already done
+  // both - but needs exactly this half, and used to get none of it.
+  //
+  // Idempotent by construction: the delete_channel job is keyed, and reapplying the category and
+  // overwrites is a no-op the second time. Only the notice is not, which is why the in-game path
+  // guards it.
+  async applyClosureToDiscord(closed, { channel = null, playerNotice }) {
     if (closed.discord_channel_id) {
       await this.repository.enqueue({
         ticketId: closed.id,
@@ -1525,13 +1538,12 @@ export class HeimdallService {
       })
     }
     const ticketChannel = channel ?? (closed.discord_channel_id ? await this.client.channels.fetch(closed.discord_channel_id).catch(() => null) : null)
-    if (ticketChannel) {
-      // Post before reapplying permissions: closing removes the author's access, so a notice sent
-      // afterwards would land in a channel they can no longer see.
-      await ticketChannel.send({ content: playerNotice, allowedMentions: ALLOWED_MENTIONS })
-      await this.refreshVisibility(ticketChannel, closed)
-    }
-    return closed
+    if (!ticketChannel) return null
+    // Post before reapplying permissions: closing removes the author's access, so a notice sent
+    // afterwards would land in a channel they can no longer see.
+    await ticketChannel.send({ content: playerNotice, allowedMentions: ALLOWED_MENTIONS })
+    await this.refreshVisibility(ticketChannel, closed)
+    return ticketChannel
   }
 
   // Closes tickets nobody has touched for the configured number of days. Off unless configured.
@@ -1659,6 +1671,10 @@ export class HeimdallService {
   // The command audit log is an opt-in module feature. Provisioning its channel lazily means an
   // install that leaves it off never gets a channel it did not ask for.
   async auditChannel({ create = false } = {}) {
+    // The one switch. Off means off for both producers and for creation, including the
+    // enabled-then-deleted recovery below - an operator who has turned this off and deleted the
+    // channel must not find it back tomorrow.
+    if (!this.config.commandAuditChannel) return null
     const stored = await this.repository.getSetting('discord.audit_channel_id')
     if (stored) {
       const existing = await this.client.channels.fetch(stored).catch(() => null)
@@ -1711,6 +1727,12 @@ export class HeimdallService {
 
   async postCommandAudit(payload) {
     const channel = await this.auditChannel({ create: true })
+    // Dropped rather than failed. With the audit switched off these jobs would otherwise retry to
+    // death and then sit in the table as `dead`, which reads as a fault rather than a setting.
+    if (!channel && !this.config.commandAuditChannel) {
+      this.logger.debug?.('Discarding a GM command audit entry: COMMAND_AUDIT_CHANNEL is off.')
+      return
+    }
     if (!channel) throw new Error('GM command audit channel could not be resolved.')
 
     const entries = Array.isArray(payload.entries) ? payload.entries : []
@@ -1754,6 +1776,16 @@ ${chunk}\`\`\``,
     if (!payload.realmTag) throw new Error('In-game sync payload is missing realmTag; it predates realm-tagged tickets.')
     const ticket = await this.repository.getIngameTicket(payload.realmTag, payload.sourceTicketId)
     if (!ticket) throw new Error(`No local in-game ticket record for ${payload.realmTag}-${payload.sourceTicketId}.`)
+
+    // The realm can end a ticket with Discord playing no part in it: a player abandons theirs, or a
+    // GM types .ticket close at the console. Both arrive down this path, and nothing used to happen
+    // - the channel sat in Open Tickets with no notice, no retention clock and nothing saying it had
+    // finished. Closure side effects ran only when a GM pressed the button in Discord.
+    //
+    // Checked before ensureTicketChannel deliberately: a ticket that has ended must not have a
+    // channel built for it.
+    if (payload.completed) return this.closeFromGame(ticket, payload)
+
     const { channel, created } = await this.ensureTicketChannel(ticket, 'support', payload.description)
     this.logger.info(created ? 'In-game ticket channel created' : 'In-game ticket re-synced',
       { ticket: ticket.public_key, channel: channel.id })
@@ -1767,6 +1799,26 @@ ${chunk}\`\`\``,
       content: `**${ticket.player_name ?? payload.playerName}** edited their in-game ticket:\n${payload.description}`,
       allowedMentions: ALLOWED_MENTIONS,
     })
+  }
+
+  // The module has already written status = 'closed', closed_at and the transcript clock in the same
+  // transaction that queued this delivery, so there is no transition to make and no `.ticket close`
+  // to send - doing either would be telling the realm something it told us. What is missing is the
+  // Discord half.
+  async closeFromGame(ticket, payload) {
+    // The notice is the one part that cannot be repeated safely, and a delivery can be retried.
+    // Recorded after the work rather than before, so a failure part-way through is retried in full
+    // rather than skipped: a duplicate notice is cosmetic, a closure that never lands is the bug
+    // this exists to fix.
+    if (await this.repository.hasAudit(ticket.id, 'ingame_closed')) return
+
+    const channel = await this.applyClosureToDiscord(ticket, {
+      playerNotice: 'This ticket was closed in game and will disappear from your channel list. '
+        + 'If you need anything else, open a new ticket from the panel.',
+    })
+    await this.repository.audit(ticket.id, 'ingame_closed', 'system',
+      { realmTag: payload.realmTag, sourceTicketId: payload.sourceTicketId })
+    this.logger.info('In-game ticket closed', { ticket: ticket.public_key, channel: channel?.id ?? 'none' })
   }
 
   async processDeliveries() {

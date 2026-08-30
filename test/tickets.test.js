@@ -543,7 +543,8 @@ test('a deleted audit channel is recreated instead of silently dropping entries'
   const board = []
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: (line) => warnings.push(line), info: () => {} }
-  service.config = { botRoleId: 'role-bot', adminRoleId: 'role-admin' }
+  service.config = { botRoleId: 'role-bot', adminRoleId: 'role-admin', commandAuditChannel: true }
+  service.botRoleId = 'role-bot'
   service.guild = {
     roles: { everyone: { id: 'everyone' } },
     channels: { create: async () => ({ id: 'audit-new' }) },
@@ -568,9 +569,27 @@ test('a deleted audit channel is recreated instead of silently dropping entries'
 test('an install that never enabled the audit stays quiet', async () => {
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => assert.fail('warned about a feature never enabled'), info: () => {} }
+  service.config = { commandAuditChannel: true }
   service.repository = { getSetting: async () => null }
   service.guild = { channels: { create: async () => assert.fail('created a channel unasked') } }
   assert.equal(await service.auditChannel({ create: false }), null)
+})
+
+// One switch for both writers. The bug it replaced was the two of them having different rights to
+// create the channel, so opting in for one silently disabled the other.
+test('the audit switch turns off creation, recovery and both writers', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} }
+  service.config = { commandAuditChannel: false }
+  // A stored id that no longer resolves is the "enabled, then deleted" case, which normally
+  // recreates. An operator who switched this off and deleted the channel must not find it back.
+  service.repository = { getSetting: async () => 'audit-old', setSetting: async () => {} }
+  service.client = { channels: { fetch: async () => null } }
+  service.guild = { channels: { create: async () => assert.fail('recreated the channel while switched off') } }
+
+  assert.equal(await service.auditChannel({ create: true }), null)
+  // And a module-queued entry is dropped rather than retried to death and left as `dead`.
+  await assert.doesNotReject(() => service.postCommandAudit({ entries: [{ line: 'anything' }] }))
 })
 
 // A bot cannot be added to a role you create. The operator made one called "BOT", pasted its id,
@@ -723,4 +742,86 @@ test('the provisioned-id block names every id an operator can pin', () => {
   // And it must be honest about what pinning costs.
   assert.match(block, /survive restarts without it/)
   assert.match(block, /switches\s+off the self-heal/)
+})
+
+// The bug this exists for: closure side effects ran only via the bot's own performClose, so ANY
+// closure originating in game - a player abandoning their ticket, or a GM typing .ticket close at
+// the console - left the channel sitting in Open Tickets with no notice and no retention clock.
+function closureService({ status = 'closed', alreadyHandled = false } = {}) {
+  const seen = { enqueued: [], sent: [], refreshed: [], audited: [] }
+  const ticket = {
+    id: 9, public_key: 'R1-9', source: 'ingame', source_ticket_id: 42, realm_tag: 'R1',
+    status, discord_channel_id: 'chan-9', player_name: 'Annoyingass',
+  }
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.config = { closedChannelDeleteHours: 168, retentionDays: 180 }
+  service.repository = {
+    getIngameTicket: async () => ticket,
+    hasAudit: async () => alreadyHandled,
+    audit: async (...args) => { seen.audited.push(args) },
+    enqueue: async (job) => { seen.enqueued.push(job) },
+    ingameDescriptionSeen: async () => 1,
+  }
+  service.client = { channels: { fetch: async () => ({ send: async (payload) => seen.sent.push(payload.content) }) } }
+  service.refreshVisibility = async (channel, row) => { seen.refreshed.push(row.status) }
+  service.ensureTicketChannel = async () => {
+    assert.fail('a ticket that has ended must not have a channel built for it')
+  }
+  return { service, seen, ticket }
+}
+
+test('a ticket closed in game gets the same Discord treatment as one closed from Discord', async () => {
+  const { service, seen } = closureService()
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
+
+  const deletion = seen.enqueued.find((job) => job.kind === 'delete_channel')
+  assert.ok(deletion, 'the closed-channel retention clock never started')
+  assert.equal(deletion.payload.channelId, 'chan-9')
+  assert.ok(deletion.availableAt instanceof Date, 'the deletion was not scheduled')
+
+  assert.equal(seen.sent.length, 1, 'the player was never told the ticket ended')
+  assert.match(seen.sent[0], /closed in game/)
+  assert.deepEqual(seen.refreshed, ['closed'], 'the channel was not moved out of Open Tickets')
+  assert.equal(seen.audited[0][1], 'ingame_closed')
+
+  // Nothing here may talk to the realm: it closed the ticket, we are catching up.
+  assert.equal(seen.enqueued.filter((job) => job.direction === 'soap').length, 0,
+    'told the realm to close a ticket it had already closed')
+})
+
+test('an abandoned ticket reaches that same end state', async () => {
+  // Abandoning calls TicketMgr::CloseTicket, which sets type = TICKET_TYPE_CLOSED and leaves the row
+  // in place - so it arrives as an ordinary completed sync and must not be a special case.
+  const { service, seen } = closureService()
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
+  assert.equal(seen.sent.length, 1)
+  assert.deepEqual(seen.refreshed, ['closed'])
+})
+
+test('a second delivery for the same in-game closure changes nothing', async () => {
+  const { service, seen } = closureService({ alreadyHandled: true })
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
+  assert.deepEqual(seen.sent, [], 'the closing notice was posted twice')
+  assert.deepEqual(seen.enqueued, [])
+})
+
+test('a sync for a ticket that is still open closes nothing', async () => {
+  const { service, seen } = closureService({ status: 'open' })
+  service.ensureTicketChannel = async () => ({ channel: { id: 'chan-9', send: async () => {} }, created: false })
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 0, description: 'help' })
+  assert.deepEqual(seen.sent, [])
+  assert.deepEqual(seen.refreshed, [])
+  assert.deepEqual(seen.audited, [])
+})
+
+test('both closure routes run the same Discord side effects', () => {
+  // Duplicated closure paths are how this class of bug comes back, so the two routes must share
+  // one implementation rather than two that look alike today.
+  const source = fs.readFileSync(new URL('../src/discord.js', import.meta.url), 'utf8')
+  const calls = source.match(/this\.applyClosureToDiscord\(/g) ?? []
+  assert.equal(calls.length, 2, 'expected exactly performClose and closeFromGame to call it')
+  const body = source.slice(source.indexOf('async applyClosureToDiscord'))
+  assert.ok(body.includes('delete_channel'), 'the retention clock left the shared path')
+  assert.ok(body.includes('refreshVisibility'), 'the category move left the shared path')
 })

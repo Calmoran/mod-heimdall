@@ -43,6 +43,15 @@ function logLevel(value) {
 // the database, so these are optional. An untouched `replace_with_...` counts as absent, not as a
 // configured value - otherwise a fresh install would try to fetch a channel named after the
 // placeholder. A real ID set here always wins, and is checked at startup rather than trusted.
+// Absent means the default, which is why this cannot just be `Boolean(value)`.
+function flag(value, name, fallback) {
+  const raw = (value ?? '').trim().toLowerCase()
+  if (!raw) return fallback
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false
+  throw new Error(`${name} must be a yes/no value, not ${JSON.stringify(value)}`)
+}
+
 function optionalId(value) {
   const trimmed = (value ?? '').trim()
   if (!trimmed || trimmed.startsWith('replace_with_')) return null
@@ -108,6 +117,12 @@ export function loadConfig(env = process.env) {
     // Minutes a ticket may sit unclaimed before staff are pinged. 0 keeps an existing install
     // silent, which is what it was before this option existed.
     queueNudgeMinutes: positiveInt(env.QUEUE_NUDGE_MINUTES, 'QUEUE_NUDGE_MINUTES', 0, 0),
+    // Governs BOTH producers that write to the GM command audit channel: the module's own command
+    // log, and the bot's attribution of the SOAP commands it issues. One switch, because the bug
+    // this replaced was the two of them having different rights to create the channel - opting in
+    // for one silently disabled the other. On by default: a bot that runs GM commands on your realm
+    // should say so, and the realm's own log records them all as "Console".
+    commandAuditChannel: flag(env.COMMAND_AUDIT_CHANNEL, 'COMMAND_AUDIT_CHANNEL', true),
     log: {
       level: logLevel(env.LOG_LEVEL),
       directory: env.LOG_DIR ? path.resolve(env.LOG_DIR) : path.resolve('.'),

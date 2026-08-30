@@ -25,6 +25,13 @@ channels it can neither read nor repair.
 - `DELIVERY_MAX_ATTEMPTS`: retry limit before a job is marked dead; default 12.
 - `AUTO_CLOSE_INACTIVE_DAYS`: close tickets nobody has touched for this many days; `0`
   disables it; default 0.
+- `COMMAND_AUDIT_CHANNEL`: whether the `gm-command-audit` channel exists at all; default on.
+  It governs both writers — the module's command log, and the bot's record of the SOAP
+  commands it issues on a named person's behalf — because they share one channel and
+  splitting the decision is what made the bot's half impossible to enable. Off means the
+  channel is never created, never recreated if you delete it, and entries already queued are
+  discarded rather than retried. Leaving it on is recommended: the realm logs every command
+  the bot sends as "Console", and this is the only record of who actually asked for it.
 - `QUEUE_NUDGE_MINUTES`: how long a ticket may sit unclaimed before the queue board pings
   the Game Master role, once per ticket; `0` disables it; default 0.
 

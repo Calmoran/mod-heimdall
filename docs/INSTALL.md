@@ -225,7 +225,58 @@ Rolling back: stop the bot, restore the previous code and configuration, and reb
 if the module changed. Restore the table backup only if a migration cannot be carried forward. Do
 not edit `gm_ticket` to force a rollback.
 
-## 9. Fresh-install verification
+## 9. Moving Heimdall to a different guild
+
+Supported, with one thing that does not come across. Read the whole section before starting.
+
+Every ticket row records the Discord channel it was given, and those ids belong to the old guild.
+**Open tickets recover by themselves** — the module re-reads every open ticket on each poll, finds
+the channel missing, and rebuilds it in the new guild. **Closed tickets do not.** Their channels stay
+behind in the old guild and nothing in the new one links to them.
+
+What that costs is less than it sounds: the transcript itself lives in the `heimdall_event` table and
+the archive directory, not in Discord, so nothing is lost — the closed ticket's *Discord channel* is
+what becomes unreachable. If those channels matter to you, export them from the old guild before you
+start, because after the move nothing points at them.
+
+1. Stop the bot.
+2. Back up the `heimdall_*` tables.
+3. Invite the application to the new guild and create the three staff roles there. Do not create a
+   role for the bot; Discord makes one when you invite it.
+4. Update `DISCORD_GUILD_ID` and the three role ids in `.env`, and blank any pinned channel or
+   category id back to its placeholder — those ids name channels in the old guild and the bot will
+   refuse to start while they do not resolve.
+5. Clear the stored Discord layout, so the bot provisions a new one instead of looking for the old:
+
+   ```sql
+   DELETE FROM heimdall_setting WHERE setting_key LIKE 'discord.%';
+   ```
+
+   That covers the categories, the panel and queue channels, their message ids, the audit channel and
+   the per-ticket staff thread ids.
+6. Drop the queued channel deletions for the old guild, which can no longer succeed and would
+   otherwise retry to `dead`:
+
+   ```sql
+   DELETE FROM heimdall_delivery WHERE kind = 'delete_channel' AND state <> 'delivered';
+   ```
+
+7. Optionally clear the stale channel ids on closed tickets, so nothing reads as though it still has
+   somewhere to point:
+
+   ```sql
+   UPDATE heimdall_ticket SET discord_channel_id = NULL
+    WHERE status IN ('closed', 'cancelled');
+   ```
+
+8. Start the bot. It provisions the new layout and prints the ids. Open tickets get their channels
+   back on the next poll — within `Heimdall.TicketPollSeconds`, 15 seconds by default.
+
+Do not run the bot against both guilds at once by copying the `.env`. The single-instance lock is
+per process and both copies would be answering the same tickets; the second one refuses to start,
+which is the intended outcome but not a migration strategy.
+
+## 10. Fresh-install verification
 
 1. The bot starts without printing secrets and posts one panel, not a duplicate.
 2. A player creates Support, Bug Report, and Player Report tickets; each receives
