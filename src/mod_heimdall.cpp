@@ -276,6 +276,39 @@ public:
 
             LOG_INFO(LOG_FILTER, "GM identity \"{}\" resolved to account {} ({}).", name, cache->AccountId, cache->Guid.ToString());
         }
+
+        PublishConfigured();
+
+        // An empty list is the shipped default, and it used to say nothing at all - the only trace
+        // was "0 GM identity(ies)" at the end of a line that otherwise reads like success. The
+        // operator found out when a GM pressed reply mid-conversation with a player and the realm
+        // refused the whisper. Every new install starts in this state, so it gets its own line.
+        if (_identities.empty())
+        {
+            LOG_WARN(LOG_FILTER, "No GM identities are configured, so nobody can whisper a player from "
+                "Discord and no GM identity can be logged in. Set Heimdall.GmIdentities in "
+                "heimdall.conf to a character that exists on this realm, then restart the worldserver.");
+        }
+    }
+
+    // The bot cannot see heimdall.conf, so a GM name typed into /ticket staff-add was only a format
+    // check and a typo surfaced much later as a SOAP refusal. Publishing the names that survived the
+    // resolution above lets the bot refuse the typo at the moment it is made. Only resolved names go
+    // out, so a heimdall.conf mistake shows up here too.
+    void PublishConfigured() const
+    {
+        std::string names;
+        for (auto const& entry : _identities)
+        {
+            if (!names.empty())
+                names += ",";
+            names += entry.first;
+        }
+
+        CharacterDatabase.Execute(
+            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Escape("ingame.gm_identities." + _realmTag), Escape(names));
     }
 
     [[nodiscard]] bool IsConfigured() const { return !_identities.empty(); }

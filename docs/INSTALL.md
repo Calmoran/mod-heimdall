@@ -26,6 +26,13 @@
 
    It creates seven tables named `heimdall_*` and touches nothing else. Running it twice is safe.
 5. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
+
+   **Then edit `heimdall.conf`, and only `heimdall.conf`.** The one file the worldserver reads is
+   `server/configs/modules/heimdall.conf`. Every file named `*.conf.dist` is a template: the build
+   rewrites them on each compile, and while your `.conf` exists none of them is read at all. A
+   build tree contains several — including copies under `build/bin/Release/` and
+   `build/bin/RelWithDebInfo/` — and editing any of them changes nothing, silently. If a setting
+   you are certain you changed has no effect, check which file you changed.
 6. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
 7. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
 
@@ -84,6 +91,49 @@ Your `heimdall.conf` is yours and the build does not touch it. That means new op
 release will not appear in it either: after upgrading, diff it against the fresh `.dist` to see
 what is new, and back it up first so you can tell what you changed.
 
+## Troubleshooting
+
+### "Missing Access" on channels the bot created
+
+Symptom: the bot creates its channels, then immediately cannot post to them —
+`DiscordAPIError[50001] Missing Access`, `Could not secure category ...`, and the permissions
+preflight reporting missing **View Channels** on channels the bot made itself.
+
+Cause: `DISCORD_BOT_ROLE_ID` was set to a role created by hand. A bot cannot be added to a role;
+Discord creates one managed role per application, and that is the only role a bot is ever in. The
+channel overwrites then grant access to a role the bot is not in, and a server-level permission does
+not override a channel-level deny — so the bot locks itself out of channels it cannot then repair,
+because Discord does not let you manage a channel you cannot view.
+
+Current versions refuse to start in this state and name the correct id, so this should only affect
+installs first provisioned by an older version. Correcting `.env` is **not** enough on its own: the
+overwrites already exist and the bot cannot fix them.
+
+Recovery:
+
+1. Stop the bot.
+2. In Discord, delete the categories and channels Heimdall created (`Open Tickets`,
+   `Claimed Tickets`, `Closed Tickets`, the support category, `open-a-ticket`, `ticket-queue`).
+3. Remove `DISCORD_BOT_ROLE_ID` from `.env` entirely, so the bot finds its own managed role.
+4. Start the bot once. The stored ids no longer resolve, so it recreates everything with the correct
+   role and reports the new ids.
+
+If you pinned any channel id in `.env`, blank it back to the placeholder first — a configured id is
+never self-healed, by design, and the bot will refuse to start while it names a channel that no
+longer exists.
+
+### Whispers are refused with "is not a configured GM identity"
+
+`Heimdall.GmIdentities` is empty, which is the shipped default. Set it to a character that exists on
+the realm and restart the worldserver. The startup log says so explicitly, and `/ticket staff-add`
+refuses a name the realm has not accepted rather than letting it fail later, mid-conversation.
+
+### A character cannot log in to the test realm
+
+The client's `realmlist.wtf` takes the **auth server's** address and port, not the world server's.
+The world port is never typed by a player: it is what the `realmlist` table advertises to a client
+that has already authenticated. Pointing a client at the world port produces a login that hangs.
+
 ## Platform notes
 
 **Windows — tested.** Build with the Visual Studio generator. Limit parallelism if the build fails
@@ -114,6 +164,11 @@ rebuild.
 
 Before testing a change, confirm the installed `worldserver` binary is newer than the module source.
 A stale binary produces results that look like bugs in your configuration.
+
+**If you copied the module into `modules/` rather than linking it, copy it again after every source
+change.** A copy does not track the original, so the build recompiles the old code and succeeds,
+which looks exactly like a change that did not work. A directory junction (`mklink /J` on Windows,
+a symlink elsewhere) avoids the problem entirely and is transparent to CMake.
 
 Back up `heimdall.conf` before upgrading and diff it against the new `heimdall.conf.dist`
 afterwards. The build does not overwrite your file, but it does replace the `.dist` beside it, and a
