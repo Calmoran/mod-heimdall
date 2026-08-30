@@ -647,6 +647,21 @@ public:
                 "Resuming at watermark {} with {} known ticket(s) and {} GM identity(ies).",
                 _settings.realmTag, _watermark, uint32(_seen.size()), uint32(IdentityRegistry::instance()->GetAll().size()));
         }
+
+        // A rebuild regenerates heimdall.conf from the .dist and silently returns every option to
+        // its shipped default, so anything the operator switched on deliberately switches itself
+        // off. The command audit is the worst casualty because it fails invisibly by nature -
+        // nobody notices an accountability log has stopped until they need what is not in it.
+        // Stating the resolved set here makes a reverted config something an operator can see in
+        // the log rather than something they discover when the evidence is missing.
+        std::string const auditState = _settings.commandAuditEnabled
+            ? "ENABLED (security " + std::to_string(_settings.commandAuditMinSecurity) + "+)"
+            : "disabled";
+        LOG_INFO(LOG_FILTER, "Resolved configuration: command audit {}, ticket poll {}s, delivery poll {}s, "
+            "whisper limit {} bytes, archive retention {} day(s). These are the values in effect; if one "
+            "is not what you set, check that a rebuild has not restored heimdall.conf from the .dist.",
+            auditState, _settings.ticketPollSeconds, _settings.deliveryPollSeconds,
+            _settings.maxWhisperBytes, _settings.archiveRetentionDays);
     }
 
     void OnShutdownInitiate(ShutdownExitCode /*code*/, ShutdownMask /*mask*/) override

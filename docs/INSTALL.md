@@ -74,6 +74,16 @@ On Windows the install rules may not honour the `CONF_DIR` you passed to CMake. 
 `worldserver.conf.dist` on disk and work from there rather than from what the configure summary
 printed.
 
+**Edit `heimdall.conf`, never `heimdall.conf.dist`.** The build copies the `.dist` into that
+directory on every single build, so anything you write in it is overwritten the next time you
+compile. It is also not the file the worldserver reads once `heimdall.conf` exists, so an edit
+there has no effect in the meantime — it fails quietly in both directions. The `.dist` is a
+reference copy of the shipped defaults; treat it as read-only and diff against it when upgrading.
+
+Your `heimdall.conf` is yours and the build does not touch it. That means new options added by a
+release will not appear in it either: after upgrading, diff it against the fresh `.dist` to see
+what is new, and back it up first so you can tell what you changed.
+
 ## Platform notes
 
 **Windows — tested.** Build with the Visual Studio generator. Limit parallelism if the build fails
@@ -104,3 +114,18 @@ rebuild.
 
 Before testing a change, confirm the installed `worldserver` binary is newer than the module source.
 A stale binary produces results that look like bugs in your configuration.
+
+Back up `heimdall.conf` before upgrading and diff it against the new `heimdall.conf.dist`
+afterwards. The build does not overwrite your file, but it does replace the `.dist` beside it, and a
+release that adds an option leaves your file without it — so the new option silently runs at its
+shipped default.
+
+The worldserver states the settings it resolved at startup, in `Heimdall.log`:
+
+```
+Resolved configuration: command audit disabled, ticket poll 15s, delivery poll 5s, ...
+```
+
+Read that line after any upgrade. It is the fastest way to catch a feature you believe is on and
+is not — the command audit in particular, because an accountability log that is switched off looks
+exactly like one with nothing to report until the day you go looking for evidence.
