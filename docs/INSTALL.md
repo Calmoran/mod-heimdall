@@ -22,13 +22,21 @@
    ```
 
    Confirm it worked before building: the configure output should list `mod-heimdall`, and the generated `modules/gen_scriptloader/static/ModulesLoader.cpp` in your build tree should call `Addmod_heimdallScripts()`. A module the build does not discover produces no error at all - it simply is not there.
-4. Apply `data/sql/db_characters/base/heimdall.sql` to the Characters database during a maintenance window. Back up that database first. The connection details are in your `worldserver.conf` under `CharacterDatabaseInfo`:
+4. The database schema installs itself. When the worldserver (or `dbimport`) starts with the
+   module built in and `Updates.EnableDatabases` covering the Characters database — the shipped
+   default is all databases — AzerothCore's updater finds
+   `data/sql/db-characters/base/heimdall.sql`, applies it, and records it in the `updates` table
+   like any other module's SQL. It creates seven tables named `heimdall_*` and touches nothing
+   else; running into an existing install is safe.
+
+   **Manual fallback, only if you run with the updater disabled** (`Updates.EnableDatabases = 0`):
+   apply the file yourself during a maintenance window, with a backup first. The connection details
+   are in your `worldserver.conf` under `CharacterDatabaseInfo`:
 
    ```
-   mysql -h <host> -P <port> -u <user> -p <characters_database> < data/sql/db_characters/base/heimdall.sql
+   mysql -h <host> -P <port> -u <user> -p <characters_database> < data/sql/db-characters/base/heimdall.sql
    ```
 
-   It creates seven tables named `heimdall_*` and touches nothing else. Running it twice is safe.
 5. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
 
    **Then edit `heimdall.conf`, and only `heimdall.conf`.** The one file the worldserver reads is

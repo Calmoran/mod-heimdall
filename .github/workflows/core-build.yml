@@ -1,0 +1,47 @@
+name: core-build
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: "core-build-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  module-build:
+    runs-on: ubuntu-latest
+    name: build against azerothcore master
+    steps:
+      - name: checkout azerothcore
+        uses: actions/checkout@v4
+        with:
+          repository: azerothcore/azerothcore-wotlk
+          ref: master
+      - name: checkout module
+        uses: actions/checkout@v4
+        with:
+          path: modules/mod-heimdall
+      - name: apply the core patch
+        run: git apply modules/mod-heimdall/patches/0001-expose-loginqueryholder-to-modules.patch
+      - name: install dependencies
+        run: sudo apt-get update && sudo apt-get install -y git cmake make gcc g++ clang libmysqlclient-dev libssl-dev libbz2-dev libreadline-dev libncurses-dev libboost-all-dev
+      - name: configure
+        run: cmake -S . -B build -DMODULES=static -DTOOLS_BUILD=none -DSCRIPTS=static
+      - name: build
+        run: cmake --build build --target modules -j 2
+
+  bot-tests:
+    runs-on: ubuntu-latest
+    name: bot tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+        working-directory: bot
+      - run: npm test
+        working-directory: bot
+      - run: npm run check
+        working-directory: bot

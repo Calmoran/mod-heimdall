@@ -1,0 +1,26 @@
+## Handle line endings automatically for files detected as text,
+## and leave files detected as binary untouched.
+*   text=auto eol=lf
+
+# Text
+*.cpp text
+*.h text
+*.js text
+*.json text
+*.md text
+*.sql text
+*.conf text
+*.conf.dist text
+*.cmake text
+*.yml text
+.editorconfig text
+.gitattributes text
+.gitignore text
+
+# Scripts that must keep their line endings
+*.sh text eol=lf
+*.cmd text eol=crlf
+
+# Binary
+*.png binary
+*.ico binary
