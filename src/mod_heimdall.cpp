@@ -384,11 +384,9 @@ public:
         // Our own callback queue, pumped from the poller's OnUpdate below.
         //
         // The core's own login path uses the session's queue, but there is no session yet at this
-        // point - one is created in FinishLogin once the character data has actually loaded. Some
-        // downstream cores expose a World-level queue for exactly this case; upstream does not, and
-        // depending on it would mean the module built on one core and not the other.
-        // AsyncCallbackProcessor is a header-only template both cores carry unchanged, so owning
-        // one here needs nothing from either.
+        // point - one is created in FinishLogin once the character data has actually loaded.
+        // AsyncCallbackProcessor is a header-only template from common/, so owning one here needs
+        // nothing the core does not already ship.
         _loginCallbacks.AddCallback(CharacterDatabase.DelayQueryHolder(holder))
             .AfterComplete([name, accountId, guid](SQLQueryHolderBase const& queryHolder)
             {
@@ -703,6 +701,54 @@ public:
             "from the .dist.",
             auditState, _settings.gmChatTag ? "on" : "off", _settings.ticketPollSeconds,
             _settings.deliveryPollSeconds, _settings.maxWhisperBytes, _settings.archiveRetentionDays);
+
+        WarnAboutForeignRealmTags();
+    }
+
+    // The realm tag keys everything - the watermark, the identity state, every ticket - so
+    // changing Heimdall.RealmPrefix on a live install makes the next start a "first run" under
+    // the new tag: open tickets get re-imported with duplicate Discord channels, and their old
+    // records are orphaned where the poller never reads them again. Observed for real, with no
+    // warning and no error; it looked like it worked. This is that warning.
+    //
+    // Deliberately a warning rather than a refusal, even for stranded OPEN tickets. Refusing
+    // would turn stranded history into a bridge outage - no tickets at all reach Discord until
+    // someone does database surgery - which punishes players for an operator's config change.
+    // An ERROR-level line in the same log that carries the resolved configuration is the
+    // loudest thing that does not take the bridge down with it.
+    void WarnAboutForeignRealmTags()
+    {
+        QueryResult rows = CharacterDatabase.Query(
+            "SELECT realm_tag, SUM(status IN ('open', 'claimed', 'closing')), COUNT(*) "
+            "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag <> '{}' GROUP BY realm_tag",
+            Escape(_settings.realmTag));
+        if (!rows)
+            return;
+
+        do
+        {
+            Field* fields = rows->Fetch();
+            std::string tag = fields[0].Get<std::string>();
+            uint64 openCount = fields[1].Get<uint64>();
+            uint64 total = fields[2].Get<uint64>();
+
+            if (openCount)
+            {
+                LOG_ERROR(LOG_FILTER, "{} OPEN ticket(s) exist under realm tag \"{}\", but this install is "
+                    "configured as \"{}\". They are STRANDED: only \"{}\" is polled, so they will never "
+                    "update or close from the game again. If the prefix change was unintentional, restore "
+                    "Heimdall.RealmPrefix and restart; if it was deliberate, close the stranded tickets from "
+                    "Discord. RealmPrefix is chosen once at install and must not change afterwards.",
+                    openCount, tag, _settings.realmTag, _settings.realmTag);
+            }
+            else
+            {
+                LOG_WARN(LOG_FILTER, "{} closed ticket(s) exist under realm tag \"{}\" (this install is "
+                    "configured as \"{}\"). History only - nothing is stranded - but it means the realm "
+                    "tag changed at some point, which is not supported.",
+                    total, tag, _settings.realmTag);
+            }
+        } while (rows->NextRow());
     }
 
     void OnShutdownInitiate(ShutdownExitCode /*code*/, ShutdownMask /*mask*/) override

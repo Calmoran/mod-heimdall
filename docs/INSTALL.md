@@ -5,16 +5,16 @@
    Discord bot in `bot/`, which the build ignores. Cloning straight into `modules/` works; linking
    it in from its own directory is better, and is described under "Keeping the repository outside
    the core tree" below.
-2. **On stock AzerothCore, apply the core patch first.** From the root of your core checkout:
+2. **Apply the core patch first.** From the root of your core checkout:
 
    ```
    git apply modules/mod-heimdall/patches/0001-expose-loginqueryholder-to-modules.patch
    ```
 
    It moves a class declaration into a header so the module can build the same login query the
-   core's own login path builds. Fifteen lines, no behaviour change. Cores based on mod-playerbots
-   already carry the equivalent and must skip this step - the patch will refuse to apply, which is
-   the correct outcome. See [patches/README.md](../patches/README.md).
+   core's own login path builds. Fifteen lines, no behaviour change. If the patch refuses to
+   apply, your core already contains the change; skip the step - do not force it. See
+   [patches/README.md](../patches/README.md).
 3. Reconfigure and rebuild AzerothCore so its module loader includes `mod-heimdall`. Modules are controlled by the `MODULES` CMake variable, which must not be `none`:
 
    ```
@@ -191,9 +191,9 @@ binary.
 
 ## Rebuilding after an update
 
-**On stock AzerothCore, a core update can revert the patch.** Reapply it before rebuilding. You will
-know if you forget: the module fails to compile with `use of undefined type 'LoginQueryHolder'`. It
-cannot silently half-work.
+**A core update can revert the patch.** Reapply it before rebuilding. You will know if you
+forget: the module fails to compile with `use of undefined type 'LoginQueryHolder'`. It cannot
+silently half-work.
 
 Any change under `src/` requires reconfiguring and rebuilding the worldserver. The module is
 statically linked; there is no plugin to swap. A release that changes only the companion bot needs no

@@ -1,6 +1,6 @@
 # Core patches
 
-One patch, needed on stock AzerothCore only.
+One patch, required before building the module.
 
 ## `0001-expose-loginqueryholder-to-modules.patch`
 
@@ -25,16 +25,6 @@ Bringing a character in that way means doing what the core's own login path does
 So the header offers a public function whose argument no other code can construct. This patch
 closes that gap and does nothing else.
 
-### Which cores need it
-
-| Core | Needed? |
-|---|---|
-| Stock AzerothCore | **Yes** |
-| mod-playerbots based cores | **No** — they already carry the equivalent, with the class in `WorldSession.h` and the same `QueryHolder.h` include |
-
-Applying it to a core that already has the class will fail cleanly, because the patch will not
-apply. That is the correct outcome; do not force it.
-
 ### Applying it
 
 From the root of your AzerothCore checkout:
@@ -49,8 +39,9 @@ Check it applied before building:
 git diff --stat
 ```
 
-should show `CharacterHandler.cpp` and `WorldSession.h` changed, 15 insertions and 14 deletions. Or
-look for the class directly:
+should show `CharacterHandler.cpp` and `WorldSession.h` changed, 15 insertions and 14 deletions.
+If the patch refuses to apply, your core already contains the change; skip it - do not force it.
+Or look for the class directly:
 
 ```
 grep -n "class LoginQueryHolder" src/server/game/Server/WorldSession.h

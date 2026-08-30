@@ -18,6 +18,12 @@ Heimdall.Enabled = 0
 # stays disabled rather than writing keys that would collide with another realm sharing the
 # database. A short tag reads better in Discord; the width is headroom, since the automatic
 # fallback is at most "R255" - worldserver refuses a RealmID above 255.
+#
+#        CHOOSE THIS ONCE, AT INSTALL. The tag keys everything - the watermark, identity state,
+#        and every ticket - so changing it later makes the next start a first run under the new
+#        tag: open tickets are re-imported with duplicate Discord channels, and their old records
+#        are orphaned where the poller never reads them. The worldserver warns at startup when
+#        tickets exist under a tag other than the configured one.
 Heimdall.RealmPrefix = ""
 
 # What the very first poll on this realm does with the ticket history already in gm_ticket. Only

@@ -29,11 +29,10 @@ itself is untouched. Replies carry the client's `<GM>` chat badge
 (`Heimdall.GmChatTag`, default on) — a protocol flag a player character cannot
 forge, so players can trust who is answering.
 
-Holding a character that way needs one small patch to stock AzerothCore, shipped in
+Holding a character that way needs one small patch to AzerothCore, shipped in
 [patches/](patches/): it moves a class declaration into a header so a module can build
 the login query the core's own login path builds. Fifteen lines, no behaviour change.
-Cores based on mod-playerbots already carry the equivalent and need nothing. A pull
-request to upstream it is planned, after which the patch step disappears.
+A pull request to upstream it is planned, after which the patch step disappears.
 
 ## Staff workflow
 

@@ -5,9 +5,8 @@ realm. Do not start on a public realm.
 
 ## 1. Install the module first
 
-Follow [the module installation guide](INSTALL.md). On stock AzerothCore that includes applying one
-small core patch before building; cores based on mod-playerbots do not need it. Confirm its SQL
-tables exist in the Characters database.
+Follow [the module installation guide](INSTALL.md), including its one small core patch before
+building. Confirm the module's SQL tables exist in the Characters database.
 
 The bot is not a second download: it lives in this repository's `bot/` directory, so the clone you
 just installed the module from already contains it. Every command in this guide runs from `bot/`

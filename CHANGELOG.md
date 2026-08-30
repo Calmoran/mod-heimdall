@@ -34,6 +34,9 @@ through documented GM commands over SOAP.
 - **A startup line that states the resolved configuration** — command audit, GM chat tag, poll
   timings — so a config file silently reverted by a rebuild is visible in the log rather than
   discovered when a feature is missed.
+- **A realm-tag guard**: the tag is chosen once at install; the worldserver warns at startup —
+  ERROR-level for stranded open tickets — when tickets exist under any other tag, because changing
+  the prefix mid-life re-imports open tickets and orphans the old records.
 
 ### The Discord bot (bot/)
 
@@ -85,9 +88,8 @@ through documented GM commands over SOAP.
 
 ### Requirements worth knowing before installing
 
-- On stock AzerothCore, one small core patch (shipped in `patches/`, 15 lines, no behaviour change)
-  is required before building. mod-playerbots-based cores already carry the equivalent and need
-  nothing. An upstream pull request is planned so the step can eventually disappear.
+- One small core patch (shipped in `patches/`, 15 lines, no behaviour change) is required before
+  building. An upstream pull request is planned so the step can eventually disappear.
 - The bot must run on the same host as the realm — it needs loopback MySQL and loopback SOAP — and
   its database account is scoped to the module's own `heimdall_*` tables. It is never given access
   to player data or `gm_ticket`.
