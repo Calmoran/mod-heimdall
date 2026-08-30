@@ -719,14 +719,34 @@ public:
             return;
         _ticketElapsed = 0;
 
-        // Rows at or after the watermark cover tickets that are new or whose text changed. Tickets we
-        // still consider live have to be re-read regardless: neither SetClosedBy nor SetCompleted
-        // touches lastModifiedTime, so a closure never moves a row past the watermark on its own.
+        // Three ways a row can be worth reading.
+        //
+        // 1. At or after the watermark: new tickets, and tickets whose text changed.
+        // 2. Still open in gm_ticket: re-read every pass, because neither SetClosedBy nor
+        //    SetCompleted touches lastModifiedTime, so a closure never moves a row past the
+        //    watermark on its own. Load-bearing; do not simplify it.
+        // 3. Still open as far as the BRIDGE is concerned. This closes a gap that clauses 1 and 2
+        //    cannot: the moment a ticket is closed in game it stops satisfying clause 2, and its
+        //    lastModifiedTime never moved, so unless it happens to be the most recently modified
+        //    ticket on the realm it also fails clause 1. The closure is then never observed at all -
+        //    silently, and permanently, because nothing ever revisits that row.
+        //
+        //    It looked as though clause 2 covered this. It does not: it is evaluated against the
+        //    row's state AFTER the close, not before. An abandoned ticket was seen during testing
+        //    only because it was the newest one on the realm, which made `lastModifiedTime >=
+        //    watermark` true by equality.
+        //
+        //    Reconciling against heimdall_ticket rather than an in-memory set is deliberate: it is
+        //    the bridge's own record of what it believes is unfinished, it survives a restart, and
+        //    it is the same table SeedSeenTickets already reads.
         QueryResult rows = CharacterDatabase.Query(
             "SELECT Id, playerGuid, name, description, lastModifiedTime, completed, type "
-            "FROM gm_ticket WHERE type IN (0, 1, 2) AND (lastModifiedTime >= {} OR (completed = 0 AND type = 0)) "
+            "FROM gm_ticket WHERE type IN (0, 1, 2) AND (lastModifiedTime >= {} OR (completed = 0 AND type = 0) "
+            "  OR Id IN (SELECT source_ticket_id FROM heimdall_ticket "
+            "            WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id IS NOT NULL "
+            "              AND status IN ('open', 'claimed', 'closing'))) "
             "ORDER BY Id",
-            _watermark);
+            _watermark, Escape(_settings.realmTag));
         if (!rows)
             return;
 
