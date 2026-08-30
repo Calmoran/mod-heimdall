@@ -17,7 +17,9 @@ in the sibling `heimdall-bot` project.
 Each GM identity is a real character the module holds in-world with no game client
 attached, so a whisper addressed to it is an ordinary whisper that the stock script
 hooks already see. Nothing bypasses normal whisper validation, and the chat path
-itself is untouched.
+itself is untouched. Replies carry the client's `<GM>` chat badge
+(`Heimdall.GmChatTag`, default on) — a protocol flag a player character cannot
+forge, so players can trust who is answering.
 
 Holding a character that way needs one small patch to stock AzerothCore, shipped in
 [patches/](patches/): it moves a class declaration into a header so a module can build

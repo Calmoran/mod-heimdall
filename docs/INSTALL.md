@@ -34,6 +34,26 @@
    `build/bin/RelWithDebInfo/` — and editing any of them changes nothing, silently. If a setting
    you are certain you changed has no effect, check which file you changed.
 6. Leave `Heimdall.Enabled = 0` while validating SQL and configuration loading. Enable only after the bot and the development-realm checks are ready.
+
+   **The GM identity comes after the realm is running, not before.** `Heimdall.GmIdentities` must
+   name a character that already exists on the realm — the module validates the list at startup and
+   skips names it cannot resolve. But creating a character needs a running realm, which is later
+   than this config step. Following this file top to bottom and filling in `GmIdentities` now
+   produces a working install with no whisper capability and a warning you have not seen yet. The
+   order that works:
+
+   1. Build, install, and start the worldserver with `GmIdentities` still empty.
+   2. Log in with the game client and create the character your GM identity will use. An ordinary
+      character; the module supplies GM mode at login.
+   3. Set `Heimdall.GmIdentities = "ThatName"` in `heimdall.conf`.
+   4. **Restart the worldserver** — the list is read once at startup.
+   5. Check the startup line in the module log. Healthy is `1 GM identity(ies)` (or however many
+      you named); `0 GM identity(ies)` plus a warning means the name did not resolve.
+
+   The identity's whispers carry the client's `<GM>` chat badge, governed by `Heimdall.GmChatTag`
+   (default on). The badge is rendered from a protocol flag a player character cannot forge, so a
+   player can both notice a staff reply and trust who sent it; turn it off only for an in-character
+   support desk.
 7. Install the companion bot using its own guide. Give its MySQL account privileges only on tables named `heimdall_%`.
 
 The module only reads `gm_ticket`. All in-game lifecycle changes must use documented AzerothCore GM commands over the existing loopback SOAP service; never grant the bot write access to `gm_ticket`.

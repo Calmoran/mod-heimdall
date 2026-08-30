@@ -44,6 +44,16 @@ Heimdall.DeliveryPollSeconds = 5
 # connected, and stands down if a client later logs in on one.
 Heimdall.GmIdentities = ""
 
+#
+#    Heimdall.GmChatTag
+#        Whether whispers from a GM identity carry the client's <GM> chat badge.
+#        The badge is rendered from a protocol flag a player character cannot forge, so a
+#        player can both notice the reply and trust who sent it. Turn it off only for an
+#        in-character support desk that does not want replies marked as staff.
+#        Default: 1
+
+Heimdall.GmChatTag = 1
+
 # Maximum UTF-8 bytes in one WoW whisper segment. AzerothCore's chat path limits messages to 255,
 # and values outside 32-255 are clamped into that range at startup.
 Heimdall.MaxWhisperBytes = 240

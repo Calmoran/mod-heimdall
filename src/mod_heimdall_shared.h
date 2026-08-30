@@ -17,6 +17,10 @@ constexpr char const* SCRIPT_NAME = "mod_heimdall";
 // silently swallows every LOG_INFO this module emits.
 constexpr char const* LOG_FILTER = "module.heimdall";
 
+// Kept in step with the companion bot's package.json version: the two halves release together, so
+// one number answers "which Heimdall are you running" for both.
+constexpr char const* HEIMDALL_VERSION = "0.9.0";
+
 struct Settings
 {
     bool enabled = false;
@@ -35,6 +39,11 @@ struct Settings
     uint32 commandAuditBatchSeconds = 10;
     uint32 commandAuditMaxLines = 25;
     uint32 contextRefreshSeconds = 60;
+    // Whether whispers from a GM identity carry the client's <GM> chat badge. On by default: the
+    // badge is a protocol flag a player character cannot forge, so it is both how a player knows
+    // the reply is really from a Game Master and the one part of the exchange an impersonator
+    // cannot reproduce. A server running an in-character support desk can turn it off.
+    bool gmChatTag = true;
 };
 
 // Shared so the command-audit hook and the poller read the same configuration without one

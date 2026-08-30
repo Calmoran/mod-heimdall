@@ -114,6 +114,7 @@ Settings ReadSettings()
     settings.commandAuditBatchSeconds = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditBatchSeconds", 10));
     settings.commandAuditMaxLines = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMaxLines", 25), 1, 100);
     settings.contextRefreshSeconds = std::max<uint32>(10, sConfigMgr->GetOption<uint32>("Heimdall.ContextRefreshSeconds", 60));
+    settings.gmChatTag = sConfigMgr->GetOption<bool>("Heimdall.GmChatTag", true);
 
     // An operator who never reads the docs still gets working, realm-unique keys.
     settings.realmTag = settings.realmPrefix.empty()
@@ -508,6 +509,13 @@ private:
         player->SetAcceptWhispers(true);
         player->SetGameMaster(true);
         player->SetGMVisible(false);
+        // The <GM> chat badge. GM mode and GM chat are separate in the core - `.gm on` drives
+        // invisibility and immunities, `.gm chat on` drives the flag GetChatTag() reads - and
+        // without the second one an identity's whispers looked like any other player's. The badge
+        // is rendered by the client from a protocol flag a player character cannot forge, so it is
+        // how a player knows the reply is really from a Game Master. Session-only, like the two
+        // calls above; nothing reaches the character save.
+        player->SetGMChat(CurrentSettings().gmChatTag);
 
         itr->second.Session = session;
         _heldGuids.insert(guid);
@@ -542,6 +550,7 @@ private:
             // Undo the GM state so none of it reaches the character save.
             player->SetGMVisible(true);
             player->SetGameMaster(false);
+            player->SetGMChat(false);
         }
 
         session->LogoutPlayer(true);
@@ -670,15 +679,15 @@ public:
 
         if (firstRun)
         {
-            LOG_INFO(LOG_FILTER, "Enabled for realm tag \"{}\"; gm_ticket polling is read-only. "
+            LOG_INFO(LOG_FILTER, "Heimdall {} enabled for realm tag \"{}\"; gm_ticket polling is read-only. "
                 "First run: seeded a new watermark with import mode \"{}\" and {} GM identity(ies).",
-                _settings.realmTag, _settings.firstRunImport, uint32(IdentityRegistry::instance()->GetAll().size()));
+                HEIMDALL_VERSION, _settings.realmTag, _settings.firstRunImport, uint32(IdentityRegistry::instance()->GetAll().size()));
         }
         else
         {
-            LOG_INFO(LOG_FILTER, "Enabled for realm tag \"{}\"; gm_ticket polling is read-only. "
+            LOG_INFO(LOG_FILTER, "Heimdall {} enabled for realm tag \"{}\"; gm_ticket polling is read-only. "
                 "Resuming at watermark {} with {} known ticket(s) and {} GM identity(ies).",
-                _settings.realmTag, _watermark, uint32(_seen.size()), uint32(IdentityRegistry::instance()->GetAll().size()));
+                HEIMDALL_VERSION, _settings.realmTag, _watermark, uint32(_seen.size()), uint32(IdentityRegistry::instance()->GetAll().size()));
         }
 
         // A rebuild regenerates heimdall.conf from the .dist and silently returns every option to
@@ -690,11 +699,12 @@ public:
         std::string const auditState = _settings.commandAuditEnabled
             ? "ENABLED (security " + std::to_string(_settings.commandAuditMinSecurity) + "+)"
             : "disabled";
-        LOG_INFO(LOG_FILTER, "Resolved configuration: command audit {}, ticket poll {}s, delivery poll {}s, "
-            "whisper limit {} bytes, archive retention {} day(s). These are the values in effect; if one "
-            "is not what you set, check that a rebuild has not restored heimdall.conf from the .dist.",
-            auditState, _settings.ticketPollSeconds, _settings.deliveryPollSeconds,
-            _settings.maxWhisperBytes, _settings.archiveRetentionDays);
+        LOG_INFO(LOG_FILTER, "Resolved configuration: command audit {}, GM chat tag {}, ticket poll {}s, "
+            "delivery poll {}s, whisper limit {} bytes, archive retention {} day(s). These are the values "
+            "in effect; if one is not what you set, check that a rebuild has not restored heimdall.conf "
+            "from the .dist.",
+            auditState, _settings.gmChatTag ? "on" : "off", _settings.ticketPollSeconds,
+            _settings.deliveryPollSeconds, _settings.maxWhisperBytes, _settings.archiveRetentionDays);
     }
 
     void OnShutdownInitiate(ShutdownExitCode /*code*/, ShutdownMask /*mask*/) override
