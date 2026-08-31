@@ -55,11 +55,21 @@
    order that works:
 
    1. Build, install, and start the worldserver with `GmIdentities` still empty.
-   2. Log in with the game client and create the character your GM identity will use. An ordinary
-      character; the module supplies GM mode at login.
-   3. Set `Heimdall.GmIdentities = "ThatName"` in `heimdall.conf`.
-   4. **Restart the worldserver** — the list is read once at startup.
-   5. Check the startup line in the module log. Healthy is `1 GM identity(ies)` (or however many
+   2. **Create a game account for the identity, one nobody plays on.** The module holds the
+      identity by logging its character into the world with no client attached, and it refuses to
+      do that while that account has a live session: `Account N is connected right now - refusing
+      to touch it.` The refusal is deliberate — a misconfigured identity must never kick somebody
+      off their own character — but it means an identity sharing your own account stops working the
+      moment you log in to play.
+
+      That account needs **no GM level**. The module gives game-master rights to the session it
+      creates, so a plain account is enough, and it is one less administrator credential to guard.
+   3. Log in with the game client **on that account**, create the character your GM identity will
+      use, then log out again. An ordinary character; the module supplies GM mode at login. The
+      account has to be free for the module to use it.
+   4. Set `Heimdall.GmIdentities = "ThatName"` in `heimdall.conf`.
+   5. **Restart the worldserver** — the list is read once at startup.
+   6. Check the startup line in the module log. Healthy is `1 GM identity(ies)` (or however many
       you named); `0 GM identity(ies)` plus a warning means the name did not resolve.
 
    The identity's whispers carry the client's `<GM>` chat badge, governed by `Heimdall.GmChatTag`

@@ -24,6 +24,14 @@ Heimdall.Enabled = 0
 #        tag: open tickets are re-imported with duplicate Discord channels, and their old records
 #        are orphaned where the poller never reads them. The worldserver warns at startup when
 #        tickets exist under a tag other than the configured one.
+#
+#        THE TAG MUST BE UNIQUE PER DISCORD GUILD, not merely per database. Ticket keys name the
+#        Discord channels, so two realms that resolve to the same tag and point at the same guild
+#        write into each other's channels: a new ticket adopts the older realm's channel instead
+#        of creating its own, arriving with the wrong history and the wrong permissions. Leaving
+#        this blank invites exactly that, because the automatic fallback is derived from RealmID
+#        and almost every standalone install is RealmID 1, so a live realm and a test realm both
+#        become "R1". If more than one realm will ever share a guild, set an explicit tag on each.
 Heimdall.RealmPrefix = ""
 
 # What the very first poll on this realm does with the ticket history already in gm_ticket. Only

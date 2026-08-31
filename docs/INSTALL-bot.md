@@ -158,8 +158,8 @@ listener; it connects out to Discord and locally to MySQL/SOAP.
 
 ## 6. Running the bot on your platform
 
-> **Only Windows has been run.** Everything in this section for Linux and Docker is written from the
-> code and from the platform's normal conventions, and has never been executed. Treat it as a
+> **Windows and Linux have both been run. Docker has not.** The Docker section is written from the
+> code and from the platform's normal conventions and has never been executed. Treat it as a
 > starting point, and please report what was wrong.
 
 ### Windows — tested
@@ -168,11 +168,26 @@ listener; it connects out to Discord and locally to MySQL/SOAP.
 terminal first and watch the startup lines; once it is behaving, wrap it with NSSM or Task Scheduler
 so it survives a reboot. `deploy/heimdall-bot.service` is a Linux unit and does not apply.
 
-### Linux — untested
+### Linux — tested
+
+Run on Ubuntu 24.04 with Node 22 and MySQL 8.4, alongside AzerothCore built with clang.
 
 Copy `deploy/heimdall-bot.service` to your system service directory, review every path in it, then
 enable and start it the way your distribution expects. The unit sets `HEIMDALL_ENV_FILE`, runs as a
 dedicated unprivileged account, and restricts writes to the archive directory.
+
+**Review those paths properly, because the shipped unit and this guide disagree by default.** The
+unit assumes the bot lives at `/opt/heimdall-bot` with its environment file in `/etc/heimdall-bot/`,
+while step 1 of the module guide has you clone the repository into the core's `modules/` directory,
+which on a typical Linux install is somewhere under `/home`. The unit also sets
+`ProtectHome=true`, which makes `/home` unreadable to the service, so a bot left where the clone
+put it fails to start under the unit even though it runs fine by hand. Either move the bot to
+`/opt` as the unit expects, or change `WorkingDirectory`, `ExecStart`, `Environment` and
+`ProtectHome` to match where it actually is. Do not change `ProtectHome` without deciding you
+meant to.
+
+To watch the first start before committing to a unit, run it directly with
+`HEIMDALL_ENV_FILE=/path/to/.env node src/index.js` and read the startup lines.
 
 ### Docker — untested
 
