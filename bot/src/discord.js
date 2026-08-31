@@ -1,3 +1,5 @@
+import crypto from 'node:crypto'
+
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -30,6 +32,14 @@ import {
 } from './domain.js'
 
 const ALLOWED_MENTIONS = { parse: [], repliedUser: false }
+// Ticket channels are found again by a marker in their topic. The marker carries an id belonging to
+// this INSTALL, not to its realm, because the realm tag is the thing that collides: it falls back to
+// R<RealmID> and almost every standalone install is RealmID 1, so a live realm and a PTR sharing one
+// Discord guild both mint "R1-3". Without the install id the second install adopts the first's
+// channel, and a new ticket arrives carrying another realm's history and permissions. Observed for
+// real on the first Linux install.
+const MARKER_PREFIX = 'mod-heimdall'
+const INSTALL_ID_SETTING = 'discord.install_id'
 // Discord rejects webhook and username values containing "discord" or "clyde"
 // (USERNAME_INVALID_CONTAINS), so this deliberately contains neither.
 const WEBHOOK_NAME = 'Ticket Relay'
@@ -118,6 +128,7 @@ export class HeimdallService {
   // wrong bot role is unrecoverable.
   async initialize() {
     this.guild = await this.client.guilds.fetch(this.config.guildId)
+    this.installId = await this.resolveInstallId()
     await this.verifyConfiguredRoles()
     await this.verifyBotRole()
     await this.provisionGuildLayout()
@@ -183,7 +194,13 @@ export class HeimdallService {
   // the token and two passwords, and a half-finished write would cost them all three - so it prints
   // them together instead, in the form they would have to type.
   reportProvisionedIds() {
-    this.logger.info('Provisioned Discord layout. To pin it, add these to your .env:\n'
+    const made = this.provisionedThisRun ?? []
+    if (!made.length) {
+      this.logger.info('Discord layout resolved from existing ids; nothing was created.')
+      return
+    }
+    this.logger.info(`Provisioned Discord layout: created ${made.join(', ')}. To pin the layout, add `
+      + 'these to your .env:\n'
       + `  DISCORD_PANEL_CHANNEL_ID=${this.ids.panelChannelId}\n`
       + `  DISCORD_QUEUE_CHANNEL_ID=${this.ids.queueChannelId}\n`
       + `  DISCORD_OPEN_CATEGORY_ID=${this.ids.openCategoryId}\n`
@@ -295,6 +312,31 @@ export class HeimdallService {
       + (this.config.adminRoleIds.length ? '' : ' No admin role is configured, so ticket administration '
         + 'falls back to Discord\'s Manage Server permission, and admin-only channels are visible only '
         + 'to members with the Administrator permission.'))
+  }
+
+  // Minted once and kept, rather than derived from something that looks like an identifier but is
+  // not. The realm tag is the value that collides. The guild is shared by definition in the case
+  // this exists to prevent. runId changes every process. Losing heimdall_setting mints a new id and
+  // this install's own channels then look foreign to it - they fall back to the legacy path below -
+  // which is acceptable because losing that table already costs the watermark and identity state.
+  async resolveInstallId() {
+    const stored = await this.repository.getSetting(INSTALL_ID_SETTING)
+    if (stored) return stored
+    const minted = crypto.randomBytes(4).toString('hex')
+    await this.repository.setSetting(INSTALL_ID_SETTING, minted)
+    this.logger.info(`Minted install id ${minted}. It stamps this install's ticket channels so a `
+      + 'second install sharing this Discord server cannot adopt them.')
+    return minted
+  }
+
+  // What a channel this install owns looks like.
+  channelMarker(publicKey) {
+    return `${MARKER_PREFIX}:${this.installId}:${publicKey}`
+  }
+
+  // Channels created before install ids existed. Adopted once, then rewritten to the current shape.
+  legacyChannelMarker(publicKey) {
+    return `${MARKER_PREFIX}:${publicKey}`
   }
 
   // Reduces a new install's Discord configuration to a token and a guild ID. Anything not
@@ -447,6 +489,11 @@ export class HeimdallService {
     const created = await create()
     await this.repository.setSetting(settingKey, created.id)
     this.logger.info(`Created ${describe} (${created.id}) and stored it for future runs.`)
+    // Recorded so the summary at the end of startup can say what was actually made. It used to
+    // announce "Provisioned Discord layout" on every run, including runs that created nothing and
+    // simply reused ids already pinned in .env, which reads as though channels had just appeared.
+    this.provisionedThisRun = this.provisionedThisRun ?? []
+    this.provisionedThisRun.push(describe)
     return created.id
   }
 
@@ -610,7 +657,7 @@ export class HeimdallService {
       name: safeChannelName(ticket.public_key, label),
       type: ChannelType.GuildText,
       parent: this.ids.openCategoryId,
-      topic: `mod-heimdall:${ticket.public_key}`,
+      topic: this.channelMarker(ticket.public_key),
       permissionOverwrites: this.overwrites(ticket),
       reason: `Ticket ${ticket.public_key} created`,
     }))
@@ -1143,17 +1190,79 @@ export class HeimdallService {
     return thread
   }
 
+  // Recovering a ticket's channel when its stored id is gone - deleted channel, lost setting - is
+  // deliberate behaviour, so this cannot simply stop searching. What it must not do is adopt a
+  // channel belonging to a DIFFERENT install that happens to mint the same ticket key. The marker
+  // carries an install id, so ours are recognisable and theirs are not.
+  async findAdoptableChannel(ticket) {
+    const channels = await this.guild.channels.fetch()
+    const texts = [...channels.values()].filter((candidate) => candidate?.type === ChannelType.GuildText)
+    const ours = this.channelMarker(ticket.public_key)
+    const legacy = this.legacyChannelMarker(ticket.public_key)
+
+    const mine = texts.find((candidate) => candidate.topic === ours)
+    if (mine) return { channel: mine, adopted: 'own' }
+
+    // Created before install ids existed. Adopted only if it sits in a category this install
+    // provisioned, then rewritten so it is claimed permanently and never re-examined. The category
+    // test is weak on its own - two installs can share categories, which is exactly how the
+    // original incident happened - but it is enough to bound a one-off migration.
+    const inherited = texts.find((candidate) => candidate.topic === legacy && this.ownsCategory(candidate.parentId))
+    if (inherited) return { channel: inherited, adopted: 'legacy' }
+
+    // A marker for this ticket key that is neither ours nor adoptable. Another install is writing
+    // into this guild, and the operator cannot see that from this side.
+    const foreign = texts.find((candidate) => typeof candidate.topic === 'string'
+      && candidate.topic.startsWith(`${MARKER_PREFIX}:`)
+      && candidate.topic.endsWith(`:${ticket.public_key}`)
+      && candidate.topic !== ours)
+      ?? texts.find((candidate) => candidate.topic === legacy)
+    if (foreign) return { channel: null, adopted: 'foreign', foreign }
+
+    return { channel: null, adopted: 'none' }
+  }
+
+  ownsCategory(parentId) {
+    if (!parentId || !this.ids) return false
+    return [this.ids.openCategoryId, this.ids.claimedCategoryId, this.ids.closedCategoryId, this.ids.supportCategoryId]
+      .some((id) => id && id === parentId)
+  }
+
   async ensureTicketChannel(ticket, label, description = '') {
     let channel = ticket.discord_channel_id ? await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null) : null
     if (!channel) {
-      const channels = await this.guild.channels.fetch()
-      channel = channels.find((candidate) => candidate?.type === ChannelType.GuildText && candidate.topic === `mod-heimdall:${ticket.public_key}`) ?? null
+      const found = await this.findAdoptableChannel(ticket)
+      channel = found.channel
+      if (found.adopted === 'legacy') {
+        await channel.setTopic(this.channelMarker(ticket.public_key), 'Claiming a pre-install-id ticket channel').catch(() => null)
+      }
+      if (found.adopted === 'foreign') await this.warnChannelCollision(ticket, found.foreign)
       if (channel) await this.repository.setChannel(ticket.id, channel.id)
     }
     const created = !channel
     if (!channel) channel = await this.createTicketChannel(ticket, label)
     await this.postTicketHeader(channel, ticket, description)
     return { channel, created }
+  }
+
+  // Silent correctness would be the wrong call here. Declining to adopt keeps THIS install right,
+  // but the operator's other install is misbehaving too and nothing over there will say so.
+  async warnChannelCollision(ticket, foreign) {
+    this.logger.error(`Ticket key ${ticket.public_key} already names channel #${foreign.name} (${foreign.id}), `
+      + 'which belongs to a different Heimdall install sharing this Discord server. A new channel was '
+      + 'created instead, so nothing was taken over. Give each realm its own Heimdall.RealmPrefix.')
+    if (this.collisionWarned?.has(ticket.public_key)) return
+    this.collisionWarned = this.collisionWarned ?? new Set()
+    this.collisionWarned.add(ticket.public_key)
+    const board = await this.queueBoardChannel()
+    if (!board) return
+    await board.send({
+      content: `**Two Heimdall installs are sharing this Discord server.** Ticket key `
+        + `\`${ticket.public_key}\` already names <#${foreign.id}>, which this install did not create. `
+        + 'A separate channel was made, so no tickets were mixed up here, but the other install is '
+        + 'affected too and cannot see it. Give each realm a distinct `Heimdall.RealmPrefix`.',
+      allowedMentions: ALLOWED_MENTIONS,
+    }).catch(() => null)
   }
 
   // Discord caps a modal title and a field label at 45 characters, a description or placeholder

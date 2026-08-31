@@ -732,9 +732,16 @@ public:
             uint64 openCount = fields[1].Get<uint64>();
             uint64 total = fields[2].Get<uint64>();
 
+            // The leading newline is not decoration. On the console appender these arrive welded to
+            // the end of whatever the core printed last - observed as "...script definitions in
+            // 6 ms1 OPEN ticket(s) exist under realm tag..." - which buries the loudest warning the
+            // module has. Server.log carries the same message on its own line, so the fault is
+            // upstream in the core's console output rather than in the message, and the core is not
+            // ours to patch. Starting our own line is the fix available from here. It costs one
+            // blank line in the file appenders, where the output was already correct.
             if (openCount)
             {
-                LOG_ERROR(LOG_FILTER, "{} OPEN ticket(s) exist under realm tag \"{}\", but this install is "
+                LOG_ERROR(LOG_FILTER, "\n{} OPEN ticket(s) exist under realm tag \"{}\", but this install is "
                     "configured as \"{}\". They are STRANDED: only \"{}\" is polled, so they will never "
                     "update or close from the game again. If the prefix change was unintentional, restore "
                     "Heimdall.RealmPrefix and restart; if it was deliberate, close the stranded tickets from "
@@ -743,7 +750,7 @@ public:
             }
             else
             {
-                LOG_WARN(LOG_FILTER, "{} closed ticket(s) exist under realm tag \"{}\" (this install is "
+                LOG_WARN(LOG_FILTER, "\n{} closed ticket(s) exist under realm tag \"{}\" (this install is "
                     "configured as \"{}\"). History only - nothing is stranded - but it means the realm "
                     "tag changed at some point, which is not supported.",
                     total, tag, _settings.realmTag);

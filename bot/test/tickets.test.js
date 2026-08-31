@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { PermissionFlagsBits } from 'discord.js'
+import { ChannelType, PermissionFlagsBits } from 'discord.js'
 
 import { ADMIN_PERMISSIONS, HeimdallService, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
 import { deriveRunId, loadConfig } from '../src/config.js'
@@ -736,6 +736,9 @@ test('the provisioned-id block names every id an operator can pin', () => {
     panelChannelId: '1', queueChannelId: '2', openCategoryId: '3',
     claimedCategoryId: '4', closedCategoryId: '5', supportCategoryId: '6',
   }
+  // The block is only printed on a run that actually created something. A run that reused ids
+  // already pinned in .env used to print it anyway, which read as though channels had appeared.
+  service.provisionedThisRun = ['ticket queue channel']
   service.reportProvisionedIds()
 
   const block = lines[0]
@@ -748,6 +751,19 @@ test('the provisioned-id block names every id an operator can pin', () => {
   // And it must be honest about what pinning costs.
   assert.match(block, /survive restarts without it/)
   assert.match(block, /switches\s+off the self-heal/)
+})
+
+test('a run that created nothing says so, instead of offering ids to paste', () => {
+  const service = Object.create(HeimdallService.prototype)
+  const lines = []
+  service.logger = { error: () => {}, warn: () => {}, info: (line) => lines.push(line) }
+  service.ids = { panelChannelId: '1', queueChannelId: '2' }
+  service.reportProvisionedIds()
+
+  assert.equal(lines.length, 1)
+  assert.doesNotMatch(lines[0], /DISCORD_PANEL_CHANNEL_ID=/, 'it offered a paste block for ids it did not create')
+  assert.doesNotMatch(lines[0], /Provisioned Discord layout/, 'it still claims to have provisioned a layout')
+  assert.match(lines[0], /nothing was created/)
 })
 
 // The bug this exists for: closure side effects ran only via the bot's own performClose, so ANY
@@ -1145,4 +1161,105 @@ test('/ticket refresh outside a ticket channel asks for a ticket id', async () =
   interaction.options.getInteger = () => null
   interaction.channel = { id: 'somewhere-else', isThread: () => false }
   await assert.rejects(() => service.handleAdminCommand(interaction), /inside a ticket channel, or pass ticket_id/)
+})
+
+// Two installs sharing one Discord guild both mint the key "R1-3": the realm tag falls back to
+// R<RealmID> and almost every standalone install is RealmID 1. Before install ids, the second
+// install adopted the first's channel by its topic marker, and a new ticket arrived in the Closed
+// category carrying another realm's history and permissions. Observed on the first Linux install.
+//
+// The categories are deliberately SHARED in these fixtures, because that is what actually happened:
+// the second install's .env was copied from the first, category ids included. A category check
+// alone would have passed and adopted anyway, which is why the marker carries the install id.
+function adoptionService(installId, channels) {
+  const seen = { created: [], setChannel: [], boardPosts: [], errors: [] }
+  const service = Object.create(HeimdallService.prototype)
+  service.installId = installId
+  service.ids = { openCategoryId: 'cat-open', claimedCategoryId: 'cat-claimed', closedCategoryId: 'cat-closed', supportCategoryId: 'cat-support' }
+  service.logger = { error: (message) => { seen.errors.push(message) }, warn: () => {}, info: () => {} }
+  service.guild = { channels: { fetch: async () => new Map(channels.map((channel) => [channel.id, channel])) } }
+  service.client = { channels: { fetch: async () => null } }
+  service.repository = { setChannel: async (...args) => { seen.setChannel.push(args) } }
+  service.createTicketChannel = async (ticket) => {
+    const channel = { id: 'freshly-created', topic: service.channelMarker(ticket.public_key) }
+    seen.created.push(channel)
+    // The real createTicketChannel stores the id itself; the fake must too, or the assertion
+    // below would be testing the fake rather than the code.
+    await service.repository.setChannel(ticket.id, channel.id)
+    return channel
+  }
+  service.postTicketHeader = async () => {}
+  service.queueBoardChannel = async () => ({ send: async (message) => { seen.boardPosts.push(message) } })
+  return { service, seen }
+}
+
+function guildChannel(id, topic, parentId = 'cat-open') {
+  const channel = { id, name: id, type: ChannelType.GuildText, topic, parentId }
+  channel.setTopic = async (value) => { channel.topic = value }
+  return channel
+}
+
+const collidingTicket = { id: 3, public_key: 'R1-3', discord_channel_id: null }
+
+test('a channel stamped by another install is never adopted, even in a shared category', async () => {
+  const theirs = guildChannel('their-chan', 'mod-heimdall:aaaaaaaa:R1-3', 'cat-open')
+  const { service, seen } = adoptionService('bbbbbbbb', [theirs])
+
+  const { channel, created } = await service.ensureTicketChannel(collidingTicket, 'stuck')
+
+  assert.equal(created, true, 'it adopted the other install\'s channel instead of creating its own')
+  assert.equal(channel.id, 'freshly-created')
+  assert.equal(theirs.topic, 'mod-heimdall:aaaaaaaa:R1-3', 'it rewrote a channel it does not own')
+  assert.equal(seen.setChannel.length, 1)
+  assert.equal(seen.setChannel[0][1], 'freshly-created')
+})
+
+test('a collision is announced on the queue board, because the other install cannot see it', async () => {
+  const theirs = guildChannel('their-chan', 'mod-heimdall:aaaaaaaa:R1-3')
+  const { service, seen } = adoptionService('bbbbbbbb', [theirs])
+
+  await service.ensureTicketChannel(collidingTicket, 'stuck')
+
+  assert.equal(seen.boardPosts.length, 1, 'the operator was not told two installs share this guild')
+  assert.match(seen.boardPosts[0].content, /R1-3/)
+  assert.match(seen.boardPosts[0].content, /RealmPrefix/)
+  assert.equal(seen.errors.length, 1)
+
+  // Once per ticket key per process: a busy realm must not paper the board with the same warning.
+  await service.ensureTicketChannel(collidingTicket, 'stuck')
+  assert.equal(seen.boardPosts.length, 1, 'the collision warning repeated for the same ticket')
+})
+
+test('recovering our own channel still works - finding 36 is not traded away', async () => {
+  const ours = guildChannel('our-chan', 'mod-heimdall:bbbbbbbb:R1-3')
+  const { service, seen } = adoptionService('bbbbbbbb', [ours])
+
+  const { channel, created } = await service.ensureTicketChannel(collidingTicket, 'stuck')
+
+  assert.equal(created, false, 'it failed to recover a channel it created itself')
+  assert.equal(channel.id, 'our-chan')
+  assert.equal(seen.boardPosts.length, 0, 'recovering our own channel warned about a collision')
+})
+
+test('a pre-install-id channel in our own category is adopted once and then claimed', async () => {
+  const legacy = guildChannel('legacy-chan', 'mod-heimdall:R1-3', 'cat-closed')
+  const { service, seen } = adoptionService('bbbbbbbb', [legacy])
+
+  const { channel, created } = await service.ensureTicketChannel(collidingTicket, 'stuck')
+
+  assert.equal(created, false, 'an install could not adopt its own pre-upgrade channel')
+  assert.equal(channel.id, 'legacy-chan')
+  assert.equal(legacy.topic, 'mod-heimdall:bbbbbbbb:R1-3', 'the adopted channel was not restamped')
+  assert.equal(seen.boardPosts.length, 0)
+})
+
+test('a pre-install-id channel outside our categories is left alone', async () => {
+  const stranger = guildChannel('elsewhere', 'mod-heimdall:R1-3', 'someone-elses-category')
+  const { service, seen } = adoptionService('bbbbbbbb', [stranger])
+
+  const { created } = await service.ensureTicketChannel(collidingTicket, 'stuck')
+
+  assert.equal(created, true, 'it adopted a legacy channel from outside its own categories')
+  assert.equal(stranger.topic, 'mod-heimdall:R1-3')
+  assert.equal(seen.boardPosts.length, 1, 'an unadoptable marker should still be reported')
 })
