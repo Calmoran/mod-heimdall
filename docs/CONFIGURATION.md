@@ -22,9 +22,9 @@ out. The legacy `DISCORD_ADMIN_ROLE_ID`, `DISCORD_MODERATOR_ROLE_ID` and
 upgrades untouched.
 
 Pings follow the tiers: queue nudges mention the staff roles; the empty-roster
-fallback and closure-request escalations mention the admin roles, or the staff
-roles when no admin role is configured — a mention has to land on someone, and a
-permission cannot be mentioned.
+fallback mentions the admin roles, or the staff roles when no admin role is
+configured — a mention has to land on someone, and a permission cannot be
+mentioned.
 
 `DISCORD_BOT_ROLE_ID` is **not** required and is best left unset. The bot's role
 is the managed one Discord creates for the application, which is the only role a
@@ -54,8 +54,8 @@ channels it can neither read nor repair.
   channel is never created, never recreated if you delete it, and entries already queued are
   discarded rather than retried. Leaving it on is recommended: the realm logs every command
   the bot sends as "Console", and this is the only record of who actually asked for it.
-- `QUEUE_NUDGE_MINUTES`: how long a ticket may sit unclaimed before the queue board pings
-  the Game Master role, once per ticket; `0` disables it; default 0.
+- `QUEUE_NUDGE_MINUTES`: how long a ticket may sit unclaimed before the queue board mentions
+  the staff roles, once per ticket; `0` disables it; default 0.
 
 The bot provisions its own Open, Claimed and Closed ticket categories, its panel
 channel and its staff-only ticket queue channel on first run, storing their IDs in
@@ -83,3 +83,34 @@ to start if one does not resolve, naming the variable and the id. It cannot
 recover the way it does from a stored id that stopped resolving: creating a
 replacement would leave your `.env` still naming the dead channel, and a new
 category would appear on every restart.
+
+## How configuration changes are handled
+
+A setting an operator has already set is a promise. Heimdall keeps it, and these
+are the rules it keeps it by. They bind `heimdall.conf` and `.env` equally.
+
+**An existing configuration is never broken silently.** When a setting is
+renamed or replaced, the old name keeps working and is folded into the new one.
+An install upgrades without an edit, and without a surprise.
+
+**It says so, once, at startup.** A superseded setting that is still in use is
+named in a warning that also names its replacement and says it is still
+honoured. A warning that reads like a breakage sends somebody to fix it during
+an outage, which is the opposite of the point. Being told means the migration
+happens when it suits you, and it means a maintainer reading a pasted log can
+tell how many installs still carry the old shape.
+
+**Compatibility shims are removed only on a major version**, and the removal is
+in the changelog for that version. Between major versions, an old name that
+worked keeps working.
+
+**Your file is never rewritten.** Heimdall reads configuration and does not edit
+it. Nothing appears in `.env` or `heimdall.conf` that you did not put there, and
+nothing is reformatted. Where the bot could save you typing - the provisioned
+channel ids - it prints them for you to paste instead, because that file holds
+your token and two passwords and a half-finished write would cost you all three.
+
+**A stated range is an enforced range.** Where this reference gives bounds for a
+setting, the code applies them. A value outside them is clamped or refused, not
+accepted and quietly ignored. Settings whose bounds are not enforced do not
+claim any.

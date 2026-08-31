@@ -277,9 +277,9 @@ start, because after the move nothing points at them.
 
 1. Stop the bot.
 2. Back up the `heimdall_*` tables.
-3. Invite the application to the new guild and create the three staff roles there. Do not create a
+3. Invite the application to the new guild and create your staff and admin roles there. Do not create a
    role for the bot; Discord makes one when you invite it.
-4. Update `DISCORD_GUILD_ID` and the three role ids in `.env`, and blank any pinned channel or
+4. Update `DISCORD_GUILD_ID` and the role id lists in `.env`, and blank any pinned channel or
    category id back to its placeholder — those ids name channels in the old guild and the bot will
    refuse to start while they do not resolve.
 5. Clear the stored Discord layout, so the bot provisions a new one instead of looking for the old:
@@ -317,7 +317,7 @@ which is the intended outcome but not a migration strategy.
 1. The bot starts without printing secrets and posts one panel, not a duplicate.
 2. A player creates Support, Bug Report, and Player Report tickets; each receives
    a unique `DIS-` channel and a second open ticket is rejected.
-3. Admin, Moderator, and Game Master can see an unclaimed ticket. A player can
+3. Every configured staff and admin role can see an unclaimed ticket. A player can
    see only their own Discord ticket.
 4. Add a staff mapping with `/ticket staff-add`. Confirm that an eligible role
    without a mapping cannot claim or reply.

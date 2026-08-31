@@ -312,6 +312,10 @@ export class HeimdallService {
       + (this.config.adminRoleIds.length ? '' : ' No admin role is configured, so ticket administration '
         + 'falls back to Discord\'s Manage Server permission, and admin-only channels are visible only '
         + 'to members with the Administrator permission.'))
+
+    // Collected at config time and warned about here, because configuration is parsed before there
+    // is a logger to warn with. One line per superseded variable, on every start, until it is moved.
+    for (const notice of this.config.deprecations ?? []) this.logger.warn(notice)
   }
 
   // Minted once and kept, rather than derived from something that looks like an identifier but is
@@ -535,7 +539,7 @@ export class HeimdallService {
   }
 
   async requireRosteredStaff(interaction) {
-    if (!this.canWork(interaction)) throw new Error('You need the Admin, Moderator, or Game Master role.')
+    if (!this.canWork(interaction)) throw new Error('You need a staff or admin role.')
     const staff = await this.repository.staff(interaction.user.id)
     if (!staff) throw new Error('You are not in the staff roster. Ask an administrator to add your GM name first.')
     validateGmName(staff.gm_name)
@@ -1625,7 +1629,7 @@ export class HeimdallService {
     const claimed = await this.repository.claim({ ticketId: ticket.id, discordUserId: interaction.user.id, gmName: staff.gm_name })
     if (claimed.source === 'ingame') await this.repository.enqueue({ ticketId: claimed.id, direction: 'soap', kind: 'assign_ticket', payload: { sourceTicketId: claimed.source_ticket_id, gmName: staff.gm_name, causedBy: interaction.user.id }, uniqueParts: ['assign', claimed.version] })
     await this.refreshVisibility(this.ticketChannelFrom(interaction), claimed)
-    await interaction.reply({ content: `Claimed as **${staff.gm_name}**. Other Moderators and Game Masters can no longer see this channel.`, flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS })
+    await interaction.reply({ content: `Claimed as **${staff.gm_name}**. Other staff can no longer see this channel.`, flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS })
   }
 
   async replyToPlayer(interaction, ticket, body) {

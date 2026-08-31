@@ -162,8 +162,16 @@ function scratchLogger(options = {}) {
   return { directory, logger: new Logger({ directory, console: silent, ...options }) }
 }
 
-test('a secret never reaches the log file, however it was logged', () => {
-  const token = 'MTIzNDU2Nzg5MDEyMzQ1Njc4.GaBcDe.abcdefghijklmnopqrstuvwxyz0123456789ABCD'
+// The value here is deliberately NOT shaped like a Discord token. It used to be, and although it
+// was synthetic - the first segment decoded to 123456789012345678 - GitHub's secret scanner matches
+// on shape, so it blocked the operator's first push across five historical commits. Anyone forking
+// and pushing hits the same wall without the context to know it is fake. What this test proves is
+// the registered-secret path, which does not care what the value looks like.
+//
+// Shape-based redaction is covered separately below, by a value assembled at runtime so that no
+// token-shaped literal exists in this file for a scanner to find.
+test('a registered secret never reaches the log file, however it was logged', () => {
+  const token = 'heimdall-test-credential-not-a-real-token'
   const password = 'hunter2-correct-horse'
   const { directory, logger } = scratchLogger({ secrets: [token, password] })
 
@@ -176,6 +184,30 @@ test('a secret never reaches the log file, however it was logged', () => {
   assert.ok(!written.includes(token), 'token reached the file')
   assert.ok(!written.includes(password), 'password reached the file')
   assert.match(written, /REDACTED/)
+})
+
+// The redactor that matters most in a real leak is the one that catches a secret nobody registered -
+// a token pasted into an error message by a library, say. Registering the value would test the
+// wrong path, so this one is deliberately not registered.
+test('a token-shaped value is redacted by its shape, even unregistered', () => {
+  const unregistered = ['Z'.repeat(24), 'AAAAAA', 'B'.repeat(27)].join('.')
+  const { directory, logger } = scratchLogger({ secrets: [] })
+
+  // No "Bot " prefix: that would be caught by a different pattern and prove nothing about this one.
+  logger.error(`gateway refused: ${unregistered}`)
+
+  const written = fs.readFileSync(path.join(directory, 'heimdall-bot.log'), 'utf8')
+  assert.ok(!written.includes(unregistered), 'an unregistered token-shaped value reached the file')
+  assert.match(written, /REDACTED-TOKEN/)
+})
+
+// A fixture that no longer matches Discord's shape is only half the fix; the other half is that it
+// stays that way. This fails if someone reintroduces a token-shaped literal anywhere in the suite.
+test('no token-shaped literal exists in this test file, so forks can push it', () => {
+  const source = fs.readFileSync(new URL('./tickets.test.js', import.meta.url), 'utf8')
+  const discordTokenShape = /['"`][MNO][A-Za-z0-9_-]{22,26}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}['"`]/
+  assert.doesNotMatch(source, discordTokenShape,
+    'a Discord-token-shaped literal is back; GitHub push protection will block forks')
 })
 
 test('info records that a whisper happened, never what it said', () => {
@@ -1262,4 +1294,50 @@ test('a pre-install-id channel outside our categories is left alone', async () =
   assert.equal(created, true, 'it adopted a legacy channel from outside its own categories')
   assert.equal(stranger.topic, 'mod-heimdall:R1-3')
   assert.equal(seen.boardPosts.length, 1, 'an unadoptable marker should still be reported')
+})
+
+// Finding 45. The legacy singular role variables kept working, which was the point, but nothing
+// said so: an operator on the old shape found out from a CHANGELOG or never. Silence is the bug.
+function legacyEnv(extra = {}) {
+  return {
+    DISCORD_TOKEN: 't'.repeat(30), DISCORD_GUILD_ID: '1', BOT_INSTANCE_ID: 'deprecation-test',
+    MYSQL_HOST: 'db', MYSQL_DATABASE: 'chars', MYSQL_USER: 'u', MYSQL_PASSWORD: 'p'.repeat(10),
+    SOAP_URL: 'http://127.0.0.1:7878/', SOAP_USER: 's', SOAP_PASSWORD: 'sp'.repeat(5),
+    ARCHIVE_DIR: './archive',
+    ...extra,
+  }
+}
+
+test('each legacy role variable still set is named once, with its replacement', () => {
+  const config = loadConfig(legacyEnv({
+    DISCORD_ADMIN_ROLE_ID: '111', DISCORD_MODERATOR_ROLE_ID: '222', DISCORD_GM_ROLE_ID: '333',
+  }))
+
+  assert.equal(config.deprecations.length, 3, 'one notice per superseded variable')
+  for (const [oldName, replacement] of [
+    ['DISCORD_MODERATOR_ROLE_ID', 'DISCORD_STAFF_ROLE_IDS'],
+    ['DISCORD_GM_ROLE_ID', 'DISCORD_STAFF_ROLE_IDS'],
+    ['DISCORD_ADMIN_ROLE_ID', 'DISCORD_ADMIN_ROLE_IDS'],
+  ]) {
+    const notice = config.deprecations.find((line) => line.startsWith(oldName))
+    assert.ok(notice, `nothing warned about ${oldName}`)
+    assert.ok(notice.includes(replacement), `${oldName}'s notice does not name ${replacement}`)
+    // A warning that reads like a breakage sends someone to fix it during an outage.
+    assert.match(notice, /still honoured/)
+  }
+
+  // And the warning changes nothing about what was resolved.
+  assert.deepEqual(config.staffRoleIds, ['222', '333'])
+  assert.deepEqual(config.adminRoleIds, ['111'])
+})
+
+test('an install on the current variables is not nagged', () => {
+  const config = loadConfig(legacyEnv({ DISCORD_STAFF_ROLE_IDS: '222,333', DISCORD_ADMIN_ROLE_IDS: '111' }))
+  assert.deepEqual(config.deprecations, [], 'a correctly configured install was warned at')
+})
+
+test('only the legacy variables actually set are warned about', () => {
+  const config = loadConfig(legacyEnv({ DISCORD_STAFF_ROLE_IDS: '222', DISCORD_GM_ROLE_ID: '333' }))
+  assert.equal(config.deprecations.length, 1)
+  assert.match(config.deprecations[0], /^DISCORD_GM_ROLE_ID/)
 })

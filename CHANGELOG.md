@@ -42,28 +42,28 @@ through documented GM commands over SOAP.
 
 - **Roles are two ID lists, not three fixed names.** `DISCORD_STAFF_ROLE_IDS` (who answers
   tickets, one or many tiers) and `DISCORD_ADMIN_ROLE_IDS` (who manages the roster and overrides,
-  optional â€” empty means Discord's Manage Server permission is the admin tier). Role names never
+  optional — empty means Discord's Manage Server permission is the admin tier). Role names never
   matter. A role in both lists counts once, as admin, and the startup line reports how many of each
   resolved. The legacy `DISCORD_ADMIN_ROLE_ID` / `DISCORD_MODERATOR_ROLE_ID` / `DISCORD_GM_ROLE_ID`
-  are still read and merged in â€” an existing install upgrades untouched.
-- **Zero-configuration Discord layout.** On first run the bot provisions everything it needs â€” a
+  are still read and merged in — an existing install upgrades untouched.
+- **Zero-configuration Discord layout.** On first run the bot provisions everything it needs — a
   support category holding the ticket panel and the staff queue board, plus Open, Claimed and
-  Closed ticket categories â€” appended to the end of the channel list, remembered across restarts,
+  Closed ticket categories — appended to the end of the channel list, remembered across restarts,
   and printed as one copy-paste block for operators who want the ids pinned in `.env`.
 - **A startup that refuses instead of misbehaving.** The bot verifies it is actually a member of
-  its role (and finds Discord's managed role by itself â€” do not create one), checks every
+  its role (and finds Discord's managed role by itself — do not create one), checks every
   permission in every place it works before touching anything, and stops with a named reason
   rather than provisioning channels it cannot use. A second copy of the bot refuses to start
   rather than doubling every action.
 - **Private ticket channels with claim visibility**: an unclaimed ticket is visible to all rostered
   staff; a claimed one only to its claimant and admins. In-game tickets are worked directly in the
-  staff-only channel â€” header, player card, account notes, controls and discussion in one place.
+  staff-only channel — header, player card, account notes, controls and discussion in one place.
   Discord-opened tickets keep a private staff thread, because the reporter shares that channel and
   must not see staff content.
-- **`/ticket refresh`** redraws a ticket's header and controls on demand â€” inside the ticket
+- **`/ticket refresh`** redraws a ticket's header and controls on demand — inside the ticket
   channel, or by ticket id from anywhere. Staff-level, not admin-only. Headers otherwise redraw
   only when a ticket changes state, which made layout upgrades invisible on open tickets.
-- **Consolidated controls**: three rows â€” Claim / Reply / a login-logout toggle that acts on the
+- **Consolidated controls**: three rows — Claim / Reply / a login-logout toggle that acts on the
   identity's actual current state / Close; then Reopen Ticket and the player-card utilities; then
   one GM-actions menu (revive, unstuck, stop combat, teleport, kick last). Two rows of headroom
   against Discord's five-row ceiling.
@@ -80,7 +80,7 @@ through documented GM commands over SOAP.
 - **Transcripts and attachments** archived privately with retention windows an operator controls,
   independent of whether the Discord channel still exists.
 - **A GM command audit channel** (`COMMAND_AUDIT_CHANNEL`, on by default, one switch for both
-  writers) recording what the bot ran and which Discord user asked for it â€” the realm's own log
+  writers) recording what the bot ran and which Discord user asked for it — the realm's own log
   attributes every SOAP command to "Console".
 - **Logs that answer the first three support questions**: version, run id and pid on the startup
   line; a permissions preflight that names what is missing, where, and what breaks; and secrets

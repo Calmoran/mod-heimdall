@@ -10,12 +10,17 @@ otherwise only redraw when the ticket changes state. Eligible Discord role plus 
 mapping is required to claim or send a player-facing reply. Admins may reassign,
 reopen, and close tickets.
 
-Use **Claim** before responding. Staff discussion belongs in the ticket's private
-staff thread; the ticket channel itself is visible to the person who opened a
-Discord ticket. Use **Reply to Player** only when the message must be sent
-in-game. Use **Add Note** for facts staff should retain - a note is attached to
-the player's game account and appears on every future ticket that account opens.
-Use **Request Closure** when a second person should review closure.
+Use **Claim** before responding. Use **Reply to Player** only when the message
+must be sent in-game. Use **Add Note** for facts staff should retain - a note is
+attached to the player's game account and appears on every future ticket that
+account opens.
+
+Where staff discussion belongs depends on who opened the ticket. An in-game
+ticket's channel is staff-only by its permissions, because the player has no
+Discord account in the room, so staff work directly in the channel and there is
+no thread. A Discord-opened ticket's reporter *is* in the channel, so everything
+staff-facing lives in a private thread they cannot see - never move that
+discussion into the channel, because they read it.
 
 ## Retention
 
@@ -59,8 +64,8 @@ audit records until the incident is understood.
 - **No panel or duplicate panel:** verify guild/channel IDs and the single saved
   `discord.panel_message_id` setting.
 - **Staff cannot claim:** check both their Discord role and enabled roster entry.
-- **Channel visible to too many staff:** inspect the Admin/Moderator/Game Master
-  IDs and the bot's Manage Channels/role position.
+- **Channel visible to too many staff:** inspect `DISCORD_STAFF_ROLE_IDS` and
+  `DISCORD_ADMIN_ROLE_IDS` and the bot's Manage Channels/role position.
 - **In-game update missing:** confirm module enabled, queue jobs not dead, and
   the bot's limited MySQL access.
 - **SOAP retrying:** verify loopback SOAP URL/service identity; do not expose it

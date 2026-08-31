@@ -11,7 +11,7 @@ Discord guild and development realm to verify the following:
 - Discord-native categories create unique `DIS-` channels and enforce one open
   ticket per Discord user.
 - In-game tickets create staff-only channels keyed by the realm tag, such as `R1-42`.
-- Claim hides the channel from other Moderators/Game Masters; Admin retains
+- Claim hides the channel from other staff roles; admin roles retain
   access; reassign, reopen, close, transcript archive, and retention cleanup work.
 - Attachments are private, size-limited, included in backup/restore testing, and
   removed with the transcript at expiry.

@@ -22,6 +22,12 @@ honest. Contributions are held to the same six:
    might be wrong, what was not tested, what would a reviewer object to, what did you assume
    rather than verify. This project's two best bug catches came from exactly that pass.
 
+Changing a setting: read [how configuration changes are handled](docs/CONFIGURATION.md#how-configuration-changes-are-handled)
+first. An operator's existing configuration is a promise — renamed settings keep working, the old
+name is warned about once at startup rather than broken, shims come out only on a major version, and
+their file is never rewritten. A pull request that renames or removes a setting is expected to hold
+to that.
+
 Bug reports: include the version — both halves print it at startup — and the log lines around the
 problem. The startup lines answer most questions before they are asked.
 

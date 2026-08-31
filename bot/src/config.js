@@ -90,6 +90,26 @@ export function loadConfig(env = process.env) {
   // itself: putting one id in all three variables would have handed Discord a channel-overwrite
   // array with duplicate targets, which it rejects. The three old singular variables are still
   // read and folded in, so an install that predates the lists upgrades untouched.
+  //
+  // Folding them in SILENTLY was the gap: nothing told an operator they were on the old shape, so
+  // they found out by reading a CHANGELOG, or never. Each legacy variable still set is collected
+  // here and warned about once at startup, naming its replacement and saying it is still honoured -
+  // so the migration happens when it suits them rather than during an outage, and a maintainer can
+  // tell from a pasted log how many installs still carry the old configuration.
+  //
+  // Collected rather than logged, because configuration is read before there is a logger to read
+  // it with.
+  const deprecations = []
+  const deprecate = (oldName, replacement) => {
+    if (optionalId(env[oldName])) {
+      deprecations.push(`${oldName} is deprecated - use ${replacement} (comma-separated). `
+        + 'It is still honoured, so nothing is broken and there is no rush.')
+    }
+  }
+  deprecate('DISCORD_MODERATOR_ROLE_ID', 'DISCORD_STAFF_ROLE_IDS')
+  deprecate('DISCORD_GM_ROLE_ID', 'DISCORD_STAFF_ROLE_IDS')
+  deprecate('DISCORD_ADMIN_ROLE_ID', 'DISCORD_ADMIN_ROLE_IDS')
+
   const staffRoleIds = [...new Set([
     ...roleIdList(env.DISCORD_STAFF_ROLE_IDS),
     optionalId(env.DISCORD_MODERATOR_ROLE_ID),
@@ -111,6 +131,7 @@ export function loadConfig(env = process.env) {
     guildId: env.DISCORD_GUILD_ID,
     staffRoleIds,
     adminRoleIds,
+    deprecations: Object.freeze(deprecations),
     botRoleId: optionalId(env.DISCORD_BOT_ROLE_ID),
     panelChannelId: optionalId(env.DISCORD_PANEL_CHANNEL_ID),
     openCategoryId: optionalId(env.DISCORD_OPEN_CATEGORY_ID),

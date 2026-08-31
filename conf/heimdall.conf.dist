@@ -44,10 +44,12 @@ Heimdall.RealmPrefix = ""
 #         deleted by hand afterwards. Only choose this on a realm with little or no history.
 Heimdall.FirstRunImport = "open"
 
-# Seconds between read-only scans of AzerothCore's gm_ticket table.
+# Seconds between read-only scans of AzerothCore's gm_ticket table. Minimum 1; lower is raised.
 Heimdall.TicketPollSeconds = 15
 
-# Seconds between attempts to deliver queued player-facing messages after login.
+# Seconds between attempts to deliver queued player-facing messages after login. Minimum 1; lower
+# is raised. A queued whisper waits until the player is online and the GM identity is held - it is
+# not lost, and "still queued" is not an error.
 Heimdall.DeliveryPollSeconds = 5
 
 # Comma-separated character names, one per GM identity. Each is held in-world with no game
@@ -69,11 +71,15 @@ Heimdall.GmIdentities = ""
 Heimdall.GmChatTag = 1
 
 # Maximum UTF-8 bytes in one WoW whisper segment. AzerothCore's chat path limits messages to 255,
-# and values outside 32-255 are clamped into that range at startup.
+# and values outside 32-255 are clamped into that range at startup. A longer reply is split across
+# several whispers on word boundaries; a single word longer than the limit - a pasted URL, usually -
+# is split mid-word rather than rejected.
 Heimdall.MaxWhisperBytes = 240
 
 # Days a closed in-game ticket's transcript is kept. Applied when the poll first sees the ticket
 # closed, whether it was closed by a GM, abandoned by the player, or lost with a deleted character.
+# Minimum 1; lower is raised. Keep this the same as the bot's TRANSCRIPT_RETENTION_DAYS, or an
+# in-game closure and a Discord closure give the same ticket different retention.
 Heimdall.ArchiveRetentionDays = 180
 
 # OPTIONAL EXTRA, OFF BY DEFAULT. Post every GM command attempt to an admin-only Discord channel,
@@ -85,11 +91,13 @@ Heimdall.CommandAuditEnabled = 0
 
 # Only log commands from sessions at or above this security level. 0 logs everyone including
 # ordinary players, which on a busy realm is a great deal of traffic; 1 and above is staff only.
+# AzerothCore's security levels run 0-3, and values outside that are clamped into it at startup.
 Heimdall.CommandAuditMinSecurity = 1
 
 # Commands are batched into one Discord message rather than one message each. A batch is sent
 # when it reaches MaxLines, or when BatchSeconds have passed since the first line in it.
-# MaxLines is clamped to 1-100.
+# MaxLines is clamped to 1-100; BatchSeconds has a minimum of 1. A single command line longer than
+# 1700 characters is truncated so the batch still fits one Discord message.
 Heimdall.CommandAuditBatchSeconds = 10
 Heimdall.CommandAuditMaxLines = 25
 

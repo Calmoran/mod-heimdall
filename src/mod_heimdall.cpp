@@ -110,7 +110,9 @@ Settings ReadSettings()
         settings.firstRunImport = "open";
     }
     settings.commandAuditEnabled = sConfigMgr->GetOption<bool>("Heimdall.CommandAuditEnabled", false);
-    settings.commandAuditMinSecurity = sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMinSecurity", 1);
+    // Clamped like every other numeric setting here. AzerothCore's security levels run 0-3, so a
+    // value outside that range audited either nothing or everything, and said nothing about it.
+    settings.commandAuditMinSecurity = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMinSecurity", 1), 0, 3);
     settings.commandAuditBatchSeconds = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditBatchSeconds", 10));
     settings.commandAuditMaxLines = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMaxLines", 25), 1, 100);
     settings.contextRefreshSeconds = std::max<uint32>(10, sConfigMgr->GetOption<uint32>("Heimdall.ContextRefreshSeconds", 60));

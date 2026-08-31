@@ -85,13 +85,47 @@ Follow [`docs/INSTALL-bot.md`](docs/INSTALL-bot.md) from this same clone's `bot/
 > [!TIP]
 > **[Join the Discord server](https://discord.gg/DV9FuqzYby)** for discussions, updates, and support.
 
+## Things to know before you install
+
+The limits you can move live beside the settings that move them, in
+[`conf/heimdall.conf.dist`](conf/heimdall.conf.dist) and [`bot/.env.example`](bot/.env.example).
+These are the ones you cannot.
+
+**A player may have one open in-game ticket at a time.** This is AzerothCore's own rule, enforced
+in the core, not something Heimdall adds or can lift. Heimdall applies the same rule to
+Discord-opened tickets, which is its own choice.
+
+**Replies reach players as whispers, in 240-byte segments.** Longer replies are split on word
+boundaries. A single word longer than that — a pasted URL, usually — is split mid-word rather than
+refused.
+
+**Staff space depends on who opened the ticket.** An in-game ticket's channel is staff-only by its
+permissions, so staff work directly in it. A Discord-opened ticket's reporter is in the channel, so
+staff discussion lives in a private thread instead. A private thread has no role-based visibility —
+members are added one at a time — which is why Discord-opened tickets depend on the staff roster,
+and why an empty roster is warned about.
+
+**Discord's own ceilings** apply throughout: 2000 characters per message, 4096 per embed
+description, 1024 per embed field, 25 options in a select menu, five component rows per message
+(the ticket header uses three). Discord archives an inactive thread after a week; Heimdall reopens
+one when it needs to.
+
+**Character names are 12 characters**, and realm IDs above 255 are refused by the worldserver, so
+an automatic realm tag is never longer than `R255`.
+
+**What Heimdall does not do:** it never writes to `gm_ticket` — every in-game change goes through
+documented GM commands over SOAP. It does not give the bot access to player data; the bot's database
+account reaches only the seven `heimdall_*` tables. It does not link Discord accounts to game
+accounts, so it cannot offer self-service actions on a character. It does not send item or gold
+compensation. And it needs one small core patch to hold a GM identity in the world, which ships with
+the module and changes no behaviour.
+
 ## Full documentation
 
 - [`docs/INSTALL.md`](docs/INSTALL.md) — detailed module install, troubleshooting, platform notes
 - [`docs/INSTALL-bot.md`](docs/INSTALL-bot.md) — bot install
-- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — every setting
+- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — every setting, and how configuration changes are handled
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md), [`docs/SECURITY.md`](docs/SECURITY.md) — running it
-- [`docs/LIMITS.md`](docs/LIMITS.md) — what it will not do
 
 ## How this was built
 
@@ -112,4 +146,5 @@ Built for the [AzerothCore](https://www.azerothcore.org/) community.
 
 ## License
 
-AGPL-3.0-or-later. See [`LICENSE`](LICENSE).
+AGPL-3.0-or-later, covering both halves: the server module and the bot in `bot/`. The full text is
+in [`LICENSE`](LICENSE).
