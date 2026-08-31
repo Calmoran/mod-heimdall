@@ -3,6 +3,67 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 0.9.1 — 2026-08-31
+
+A fix worth upgrading for if you run more than one Heimdall against one Discord server, and the
+first release with Linux tested end to end.
+
+### Fixed
+
+- **A second install sharing one Discord server could take over the first install's ticket
+  channels.** Ticket channels are found again by a marker in their topic, and that marker was built
+  from the ticket key alone. The key starts with the realm tag, which falls back to `R<RealmID>`
+  when `Heimdall.RealmPrefix` is blank — and almost every standalone install is RealmID 1. So a live
+  realm and a test realm pointed at one Discord server both produced keys like `R1-3`, and the
+  second install would adopt the first's channel: a brand new ticket arriving in the Closed
+  category, carrying a different ticket's history and its permissions.
+
+  Channels are now stamped with an id belonging to the install that made them, and an install will
+  not adopt a channel it did not create. Nothing to configure; the id is generated on first start.
+  Channels created before this release are adopted once and restamped.
+
+  **If you run two installs against one Discord server, upgrade.** Giving each realm its own
+  `Heimdall.RealmPrefix` is still worth doing and is still the clearer setup, but it is no longer
+  the only thing standing between you and mixed-up tickets.
+
+- Two staff-facing messages still named the Admin, Moderator and Game Master roles that 0.9.0
+  replaced with role lists. They now say "staff" and "admin", matching whatever your roles are
+  actually called.
+- Queue nudges mention every staff role, which is what the code has always done. The configuration
+  reference and `.env.example` both said the Game Master role.
+- `Heimdall.CommandAuditMinSecurity` is clamped to 0-3. Outside that range it audited either nothing
+  or everything, silently.
+- `LICENSE` now contains the AGPL-3.0 text rather than a link to it.
+
+### Changed
+
+- **Linux is tested.** Built, installed, and exercised end to end on Ubuntu 24.04 with MySQL 8.4: a
+  ticket filed in game, claimed in Discord, whispered both ways, closed, with the GM identity held
+  in world. The install docs now carry what that install actually needed:
+  - MySQL 8 refuses a password with no symbol in it, and reports only that its policy was not
+    satisfied — which does not tell you your password is the problem.
+  - **The GM identity needs its own game account**, one nobody plays on. The module refuses to hold
+    an identity whose account has a live session, so an identity sharing your own account stops
+    working the moment you log in. It needs no GM level.
+  - **The realm tag must be unique per Discord server**, not merely per database.
+  - The shipped `heimdall-bot.service` expects the bot in `/opt` and sets `ProtectHome=true`, which
+    cannot read a bot installed under `/home` where the module guide's clone puts it.
+- A superseded setting now says so. An install still using `DISCORD_ADMIN_ROLE_ID`,
+  `DISCORD_MODERATOR_ROLE_ID` or `DISCORD_GM_ROLE_ID` gets one warning per variable at startup,
+  naming the replacement and saying the old name is still honoured. Nothing breaks; you migrate when
+  it suits you. How configuration changes are handled is now written down in the configuration
+  reference.
+- Limits moved to where the settings they govern are, and `docs/LIMITS.md` is gone. The limits you
+  can change are documented beside the setting that changes them; the ones you cannot are a section
+  in the README for anyone deciding whether to install.
+- The startup summary no longer claims to have provisioned a Discord layout on runs where it created
+  nothing and simply reused the ids already in your `.env`.
+
+### Still not tested
+
+Docker. Windows and Linux are both exercised end to end; Docker is written from the code and the
+platform's conventions and has never been run.
+
 ## 0.9.0 — 2026-08-30
 
 First public release.

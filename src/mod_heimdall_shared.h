@@ -19,7 +19,7 @@ constexpr char const* LOG_FILTER = "module.heimdall";
 
 // Kept in step with the companion bot's package.json version: the two halves release together, so
 // one number answers "which Heimdall are you running" for both.
-constexpr char const* HEIMDALL_VERSION = "0.9.0";
+constexpr char const* HEIMDALL_VERSION = "0.9.1";
 
 struct Settings
 {
