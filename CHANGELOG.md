@@ -3,6 +3,31 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 1.0.0 — 2026-08-31
+
+The first release verified end to end on all three supported platforms: Windows, Linux and Docker.
+Nothing in the module or the bot changed to make Docker work — the walkthrough found five install
+blockers that were all documentation, and the docs now match what actually happens.
+
+### Fixed
+
+- **A GM name added to the staff roster was stored exactly as it was typed.** The realm matches
+  character names case-sensitively when a ticket is assigned, so `heimdalltest` was rejected with
+  *"Invalid name specified"* against a character called `Heimdalltest`. Worse, the mistyped value did
+  not stay in the roster: claiming a ticket copies it onto the ticket, so one bad roster entry
+  poisoned every ticket that person touched.
+
+  Staff-add now stores the realm's own spelling and tells you when it corrected you. Rows already
+  stored wrong repair themselves the first time they are used — there is no migration to run.
+
+- **A message to the realm that kept failing was given up on in silence.** Twelve attempts over
+  roughly 81 minutes, and then the job was buried with nothing said in the channel, before or after.
+  A ticket could sit unassigned in game while Discord showed it claimed.
+
+  Heimdall now warns in the ticket's channel after the third consecutive failure, and posts a
+  dead-letter when it gives up: which ticket, how many attempts it actually made, and the last error
+  the realm returned. Transient failures that recover on their own still say nothing.
+
 ## 0.9.1 — 2026-08-31
 
 A fix worth upgrading for if you run more than one Heimdall against one Discord server, and the
