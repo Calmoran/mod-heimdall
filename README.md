@@ -1,8 +1,10 @@
 # mod-heimdall
 
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/DV9FuqzYby)
-![Status](https://img.shields.io/badge/status-v0.9.0%20pre--release-orange)
-![Platform](https://img.shields.io/badge/tested%20on-Windows-blue)
+![Status](https://img.shields.io/badge/status-v0.9.1%20pre--release-orange)
+![Windows](https://img.shields.io/badge/Windows-tested-brightgreen)
+![Linux](https://img.shields.io/badge/Linux-tested-brightgreen)
+![Docker](https://img.shields.io/badge/Docker-untested-lightgrey)
 
 > [!IMPORTANT]
 > **Pre-release (v0.9.0).** Currently tested on Windows only — Linux and Docker support coming soon.
