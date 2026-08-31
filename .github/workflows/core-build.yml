@@ -3,9 +3,22 @@ name: core-build
 on:
   push:
   pull_request:
+  # module-build checks out azerothcore master and applies our patch, so it is a drift detector as
+  # much as a build: if upstream moves WorldSession.h or CharacterHandler.cpp the patch stops
+  # applying. On push alone that is only discovered when somebody happens to push, which on a quiet
+  # week means a stranger finds it first. Daily, we hear about it within a day.
+  schedule:
+    - cron: '0 6 * * *'
+  # A manual run button, which is what you want before cutting a release.
+  workflow_dispatch:
 
 concurrency:
-  group: "core-build-${{ github.ref }}"
+  # Keyed on the event as well as the ref, deliberately. With cancel-in-progress and a ref-only key,
+  # a scheduled run and a push to the same branch share one group - so the cron can cancel a push's
+  # own run, and that push then reports "cancelled" rather than pass or fail. A real failure would
+  # be hidden behind an unrelated schedule. Separating by event keeps cancellation useful within a
+  # rapid series of pushes, which is what it is for, without letting the two interfere.
+  group: "core-build-${{ github.event_name }}-${{ github.ref }}"
   cancel-in-progress: true
 
 jobs:
@@ -32,13 +45,24 @@ jobs:
         run: cmake --build build --target modules -j 2
 
   bot-tests:
-    runs-on: ubuntu-latest
-    name: bot tests
+    runs-on: ${{ matrix.os }}
+    name: bot tests (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      # Not optional. Without it, one failing combination cancels the other three and the run tells
+      # you less than it cost - "Windows on 20 failed" when what you needed to know was whether it
+      # was Windows or the Node version.
+      fail-fast: false
+      matrix:
+        # 20 is the documented minimum; 22 is what the operator's Linux install actually runs.
+        # Windows is where the bot is developed and Linux is where it is deployed, and until now
+        # neither combination was tested against the other.
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
       - run: npm ci
         working-directory: bot
       - run: npm test
