@@ -190,14 +190,20 @@ with `MSB1008: Only one project can be specified`. CMake does not copy the MySQL
 and OpenSSL runtime DLLs beside the executables; copy them yourself, and note that current upstream
 documentation still names the OpenSSL 3 filenames while a recent build links OpenSSL 4.
 
-**Linux — untested.** Nothing in this module is Windows-specific and it should build with the rest of
-the core, but no one has done it. Please report what was wrong.
+**Linux — tested.** Built and run end to end on Ubuntu 24.04 with clang and MySQL 8.4, including a
+ticket filed in game, claimed in Discord, whispered both ways and closed.
 
-**Docker — untested.** The module is compiled into the worldserver, so it goes in at image build
-time: add the source under `modules/` and apply the core patch before the build step, then rebuild
-the image. Adding the module
-to a running container does nothing — a module cannot be loaded without rebuilding the worldserver
-binary.
+**Docker — tested.** Run against AzerothCore's own `docker-compose.yml` on Docker Desktop. The
+module is compiled into the worldserver, so it goes in at image build time: clone it under
+`modules/` and apply the core patch *before* `docker compose up -d --build`. The build context
+includes `modules/`, so that is all it takes. Adding the module to a running container does nothing
+— a module cannot be loaded without rebuilding the worldserver binary.
+
+Two Docker-specific traps are worth knowing before you start, and both are covered in
+[INSTALL-bot.md](INSTALL-bot.md#docker--tested): the shipped compose publishes MySQL on host port
+3306, which collides with any MySQL you already have, and the container entrypoint does **not**
+create `heimdall.conf` from its `.dist` the way it does for the core's own configs — you copy that
+one yourself, in the bind-mounted `env/dist/etc/modules/`.
 
 ## Rebuilding after an update
 

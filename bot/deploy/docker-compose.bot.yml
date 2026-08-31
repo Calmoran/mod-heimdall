@@ -1,0 +1,34 @@
+# Example: the Heimdall bot as a container beside the AzerothCore stack.
+#
+# Copy this to docker-compose.override.yml in the root of your AzerothCore checkout. Compose reads
+# it automatically alongside docker-compose.yml, so no extra flags are needed.
+#
+# The bot joins ac-network and reaches the other services by name, so neither MySQL nor SOAP has to
+# be published to the host. That matters: SOAP is remote command execution on your realm, and the
+# shipped docker-compose.yml publishes it on every host interface by default.
+
+services:
+  heimdall-bot:
+    build:
+      context: ./modules/mod-heimdall/bot
+    container_name: heimdall-bot
+    restart: unless-stopped
+    # Inside the Compose network the addresses are service names, not 127.0.0.1 - which in a
+    # container means the container itself. This file assumes the .env carries:
+    #   MYSQL_HOST=ac-database
+    #   MYSQL_PORT=3306
+    #   SOAP_URL=http://ac-worldserver:7878/
+    #   ARCHIVE_DIR=/var/lib/heimdall/archive
+    env_file: ./modules/mod-heimdall/bot/.env
+    volumes:
+      - heimdall-archive:/var/lib/heimdall/archive
+    networks:
+      - ac-network
+    depends_on:
+      ac-worldserver:
+        condition: service_started
+      ac-database:
+        condition: service_healthy
+
+volumes:
+  heimdall-archive:

@@ -158,9 +158,8 @@ listener; it connects out to Discord and locally to MySQL/SOAP.
 
 ## 6. Running the bot on your platform
 
-> **Windows and Linux have both been run. Docker has not.** The Docker section is written from the
-> code and from the platform's normal conventions and has never been executed. Treat it as a
-> starting point, and please report what was wrong.
+> **All three have been run end to end**: Windows, Linux, and Docker on Docker Desktop. Each
+> section below describes what that install actually needed, not what it ought to need.
 
 ### Windows — tested
 
@@ -189,22 +188,64 @@ meant to.
 To watch the first start before committing to a unit, run it directly with
 `HEIMDALL_ENV_FILE=/path/to/.env node src/index.js` and read the startup lines.
 
-### Docker — untested
+### Docker — tested
 
-The bot has no Dockerfile. If you build one, the thing that will break is not the image, it is the
-addresses.
+Run against AzerothCore's own `docker-compose.yml` on Docker Desktop for Windows, with the bot in
+its own container on the Compose network. A ticket filed in game reached Discord, was claimed,
+whispered both ways and closed, with the GM identity held in world.
 
-`MYSQL_HOST=127.0.0.1` and `SOAP_URL=http://127.0.0.1:7878/` are correct only when the bot shares a
-host with MySQL and the worldserver. **Inside a container, `127.0.0.1` is the container itself.** On
-a Compose network, use the service names — `MYSQL_HOST=mysql`, `SOAP_URL=http://worldserver:7878/` —
-and make sure the bot is on the same network as both. If MySQL or the worldserver is on the host
-rather than in a container, `host.docker.internal` reaches it on Docker Desktop; on Linux you need
-`--add-host=host.docker.internal:host-gateway` or host networking.
+The module half needs nothing special: clone this repository into the core's `modules/`, apply the
+core patch, and `docker compose up -d --build`. The build context includes `modules/`, so the module
+is compiled in, and the schema imports itself through `ac-db-import` like any other module's SQL.
 
-The archive directory must be a volume. It holds attachments that are supposed to outlive the
-container, and it must not be inside a web root.
+Five things are Docker-specific, and four of them will stop you.
 
-Keep SOAP and MySQL bound to loopback or to the internal network. Do not publish either port.
+**The database port collides.** The shipped compose publishes MySQL on host port **3306**, which is
+whatever MySQL you already have installed. Compose reads a `.env` beside `docker-compose.yml`:
+
+```
+DOCKER_DB_EXTERNAL_PORT=127.0.0.1:64306
+DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878
+```
+
+Nothing inside the network uses these; services reach each other by name. The `127.0.0.1:` prefix
+keeps the published ports on the host's loopback rather than every interface, which matters most for
+SOAP — it is remote command execution on your realm, and the shipped default exposes it to your
+whole network.
+
+**`heimdall.conf` is an ordinary file, but nothing creates it.** The config directory is bind-mounted
+from `./env/dist/etc` in your checkout, so you edit it with any editor. The container's entrypoint
+copies `.dist` files in and creates `.conf` from `.dist` for the core's own configs — but **not for
+modules**. So `env/dist/etc/modules/heimdall.conf.dist` appears and `heimdall.conf` does not, and
+every `Heimdall.*` setting reads as missing until you copy it yourself:
+
+```
+cp env/dist/etc/modules/heimdall.conf.dist env/dist/etc/modules/heimdall.conf
+```
+
+Then restart the worldserver. (AzerothCore also accepts `AC_`-prefixed environment variables —
+`AC_HEIMDALL_GM_CHAT_TAG` and so on — if you would rather keep configuration in Compose.)
+
+**SOAP must listen on all interfaces, not loopback.** `SOAP.IP` defaults to `127.0.0.1`, which
+inside a container is the container. A bot in another container cannot reach it. Set
+`SOAP.IP = "0.0.0.0"` in `env/dist/etc/worldserver.conf`. That is safe here precisely because the
+published port is bound to the host's loopback above: the port is reachable on the Compose network
+and nowhere else.
+
+**The shipped MySQL grants do not apply.** `deploy/mysql-grants.sql` grants to `'heimdall_bot'@'localhost'`
+and `@'127.0.0.1'`. A bot in another container connects from neither — it arrives from the Compose
+network's address range. Grant to `'heimdall_bot'@'%'` instead; the network is isolated, and the
+account still reaches only the seven `heimdall_*` tables.
+
+**Addresses are service names.** `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`,
+`SOAP_URL=http://ac-worldserver:7878/`. `127.0.0.1` in a container is the container itself. If MySQL
+or the worldserver runs on the host instead, `host.docker.internal` reaches it on Docker Desktop; on
+Linux that needs `--add-host=host.docker.internal:host-gateway`.
+
+`deploy/docker-compose.bot.yml` is a worked example of the bot container, and `Dockerfile` in this
+directory builds its image. Copy the fragment to `docker-compose.override.yml` in your core
+checkout; Compose merges it automatically. The archive directory is a named volume there, because it
+holds attachments that must outlive the container.
 
 ## 7. Things that will bite you
 
