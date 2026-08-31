@@ -2,7 +2,11 @@
 
 [![Discord](https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white)](https://discord.gg/DV9FuqzYby)
 ![Status](https://img.shields.io/badge/status-v0.9.1%20pre--release-orange)
-![Platform](https://img.shields.io/badge/tested%20on-Windows%20%7C%20Linux%20%7C%20Docker-blue)
+![Windows](https://img.shields.io/badge/Windows-tested-brightgreen)
+![Linux](https://img.shields.io/badge/Linux-tested-brightgreen)
+![Docker](https://img.shields.io/badge/Docker-tested-brightgreen)
+
+[![core-build](https://github.com/Calmoran/mod-heimdall/actions/workflows/core-build.yml/badge.svg)](https://github.com/Calmoran/mod-heimdall/actions)
 
 > [!IMPORTANT]
 > **Pre-release (v0.9.1).** Tested end to end on Windows, Linux and Docker.
