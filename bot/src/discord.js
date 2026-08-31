@@ -38,6 +38,25 @@ const ALLOWED_MENTIONS = { parse: [], repliedUser: false }
 // Discord guild both mint "R1-3". Without the install id the second install adopts the first's
 // channel, and a new ticket arrives carrying another realm's history and permissions. Observed for
 // real on the first Linux install.
+// A delivery that fails keeps retrying with widening backoff: 10s, 20s, 40s ... capped at 15
+// minutes, twelve times. That is roughly 81 minutes from the first failure to the job being marked
+// dead - and until this, none of it was said out loud. Discord showed a ticket claimed while the
+// realm had never been told, and the only trace was a row in a table nobody reads.
+//
+// The retry itself stays quiet, because transient failures are normal and recovering from them is
+// the point. What speaks is the third consecutive failure - past a blip, roughly 70 seconds in,
+// while a GM plausibly still has the ticket on screen - and the moment the job is given up on.
+const DELIVERY_EARLY_WARNING_ATTEMPTS = 3
+const DELIVERY_ACTIONS = {
+  assign_ticket: 'assign this ticket to its claimant in game',
+  close_ticket: 'close this ticket in game',
+  virtual_whisper: 'deliver a staff reply to the player in game',
+  player_whisper: 'post a player message into Discord',
+  sync_ingame_ticket: 'update this ticket from the realm',
+  create_discord_ticket: 'create this ticket channel',
+  delete_channel: 'delete this ticket channel',
+  gm_command_audit: 'post to the GM command audit channel',
+}
 const MARKER_PREFIX = 'mod-heimdall'
 const INSTALL_ID_SETTING = 'discord.install_id'
 // Discord rejects webhook and username values containing "discord" or "clyde"
@@ -2064,6 +2083,56 @@ ${chunk}\`\`\``,
     this.logger.info('In-game ticket closed', { ticket: ticket.public_key, channel: channel?.id ?? 'none' })
   }
 
+  // Where a human is already looking: the ticket's own channel for a ticket-scoped job, the queue
+  // board for anything else. A job whose channel has gone falls back to the board rather than
+  // vanishing, because a lost delivery matters more than where it is reported.
+  async deliveryAudience(job) {
+    if (job.ticket_id) {
+      const ticket = await this.repository.getTicket(job.ticket_id).catch(() => null)
+      if (ticket?.discord_channel_id) {
+        const channel = await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null)
+        if (channel) return { channel, key: ticket.public_key }
+      }
+      if (ticket) return { channel: await this.queueBoardChannel(), key: ticket.public_key }
+    }
+    return { channel: await this.queueBoardChannel(), key: null }
+  }
+
+  // Speaks twice at most per job: once when it is clearly not a blip, once when it is given up on.
+  // Deliberately not called from cancelPendingChannelDeletion, which marks a job dead on purpose
+  // when a reopened ticket makes it obsolete - that is not a failure and must not be reported as
+  // one. The exclusion is structural: this only runs from a delivery that actually threw.
+  async announceDeliveryTrouble(job, error, outcome) {
+    const dead = outcome?.state === 'dead'
+    const early = !dead && Number(outcome?.attempts) === DELIVERY_EARLY_WARNING_ATTEMPTS
+    if (!dead && !early) return
+
+    const { channel, key } = await this.deliveryAudience(job)
+    if (!channel) return
+    const what = DELIVERY_ACTIONS[job.kind] ?? `carry out ${job.kind}`
+    const subject = key ? `\`${key}\`` : 'A background job'
+    // SOAP answers carry a trailing carriage return, which reaches here as a literal &#xD; and
+    // reads as noise at the end of every quoted error.
+    const reason = sanitizeText(String(error?.message ?? error).replace(/&#xD;/g, '').trim()).slice(0, 300)
+    // Counted, not asserted. An earlier draft said "about 80 minutes", which is only true at the
+    // default twelve attempts - on an install that had lowered DELIVERY_MAX_ATTEMPTS the message
+    // confidently stated a duration the job had never taken.
+    const tries = Number(outcome?.attempts) || 0
+    const effort = tries === 1 ? 'after one attempt' : `after ${tries} attempts`
+
+    const content = dead
+      ? `**${subject} — Heimdall has given up trying to ${what}, ${effort}.**
+`
+        + '**The realm did not do this**, whatever this channel '
+        + `shows. Someone needs to do it by hand, or fix the cause and reopen.
+Last error: \`${reason}\``
+      : `${subject} — still trying to ${what}; it has not reached the realm yet. `
+        + `Heimdall keeps retrying, so this may clear on its own.
+Last error: \`${reason}\``
+
+    await channel.send({ content, allowedMentions: ALLOWED_MENTIONS })
+  }
+
   async processDeliveries() {
     const jobs = await this.repository.leaseBotDeliveries(20, this.config.leaseSeconds)
     for (const job of jobs) {
@@ -2080,7 +2149,10 @@ ${chunk}\`\`\``,
           const channel = await this.client.channels.fetch(job.payload.channelId).catch(() => null)
           if (channel) await channel.delete('Configured closed-ticket review window ended')
         } else if (job.direction === 'soap' && job.kind === 'assign_ticket') {
-          const gmName = validateGmName(job.payload.gmName)
+          // Installs that predate the fix above hold names as somebody typed them, in the roster and
+          // in every ticket claimed with one. Canonicalising here rather than only at staff-add is
+          // what makes those installs correct without a migration: they converge as they are used.
+          const gmName = validateGmName(await this.canonicalGmNameForCommand(job.payload.gmName))
           if (!Number.isSafeInteger(Number(job.payload.sourceTicketId))) throw new Error('Invalid in-game ticket number.')
           const assignCommand = `.ticket assign ${job.payload.sourceTicketId} ${gmName}`
           await this.soap.commandExpectingEffect(assignCommand)
@@ -2100,8 +2172,10 @@ ${chunk}\`\`\``,
         await this.repository.delivered(job.id)
         this.logger.info('Delivery done', { id: job.id, kind: job.kind, direction: job.direction, ticketId: job.ticket_id ?? 'none' })
       } catch (error) {
-        await this.repository.failed(job.id, error, this.config.maxAttempts)
+        const outcome = await this.repository.failed(job.id, error, this.config.maxAttempts)
         this.logger.error(`Ticket delivery ${job.id} failed`, error)
+        await this.announceDeliveryTrouble(job, error, outcome).catch((announceError) =>
+          this.logger.error('Could not announce a failed delivery', announceError))
       }
     }
   }
@@ -2115,11 +2189,12 @@ ${chunk}\`\`\``,
     if (command === 'staff-add') {
       const user = interaction.options.getUser('user', true)
       const gmName = validateGmName(interaction.options.getString('gm_name', true))
-      await this.assertConfiguredIdentity(gmName)
-      await this.repository.upsertStaff(user.id, gmName)
+      const canonical = await this.assertConfiguredIdentity(gmName)
+      await this.repository.upsertStaff(user.id, canonical)
       const joined = await this.addStaffToOpenThreads(user.id)
+      const corrected = canonical !== gmName ? ` Stored as **${canonical}**, the realm's spelling.` : ''
       return interaction.reply({
-        content: `Staff mapping saved for ${user}. Added to ${joined} open ticket thread(s).`,
+        content: `Staff mapping saved for ${user}.${corrected} Added to ${joined} open ticket thread(s).`,
         flags: MessageFlags.Ephemeral,
         allowedMentions: ALLOWED_MENTIONS,
       })
@@ -2166,9 +2241,16 @@ ${chunk}\`\`\``,
     if (names === null) {
       this.logger.warn('The module has not published its GM identity list, so the GM name in '
         + `/ticket staff-add could not be checked. Restart the worldserver to enable this check.`)
-      return
+      // Nothing to canonicalise against, so the input stands. Blocking every staff-add on a
+      // half-upgraded install would be worse than the bug this guards.
+      return gmName
     }
-    if (names.some((name) => name.toLowerCase() === gmName.toLowerCase())) return
+    // Return the realm's spelling, not the operator's. Matching case-insensitively is friendly;
+    // storing what was typed is not, because every SOAP command is built from the stored form and
+    // the core refuses a name whose casing does not match the character. That refusal surfaced as a
+    // delivery retrying for 81 minutes and then dying, with nothing said to anyone.
+    const canonical = names.find((name) => name.toLowerCase() === gmName.toLowerCase())
+    if (canonical) return canonical
     if (!names.length) {
       throw new Error('No GM identities are configured on the realm, so there is no name to map to. '
         + 'Set Heimdall.GmIdentities in heimdall.conf to a real character on this realm and restart '
@@ -2177,6 +2259,24 @@ ${chunk}\`\`\``,
     throw new Error(`"${gmName}" is not a configured GM identity. The realm accepts: ${names.join(', ')}. `
       + 'Check the spelling, or add the name to Heimdall.GmIdentities in heimdall.conf and restart '
       + 'the worldserver.')
+  }
+
+  // Maps a stored name onto the realm's own spelling before it reaches a GM command. Returns the
+  // input unchanged when the module has published no list, or when the name is not in it - this is
+  // not the place to reject a name, and an unrecognised one should reach the core and be refused
+  // there rather than disappearing here.
+  //
+  // Repairs what it finds, so an install stops carrying the wrong spelling rather than correcting it
+  // on every delivery forever.
+  async canonicalGmNameForCommand(gmName) {
+    const names = await this.repository.gmIdentityNames()
+    if (!names || !names.length) return gmName
+    const canonical = names.find((name) => name.toLowerCase() === String(gmName).toLowerCase())
+    if (!canonical || canonical === gmName) return gmName
+    this.logger.info('Correcting a stored GM name to the spelling the realm uses', { stored: gmName, canonical })
+    await this.repository.canonicaliseGmName(gmName, canonical).catch((error) =>
+      this.logger.warn('Could not repair the stored GM name; the command still used the correct one.', error))
+    return canonical
   }
 
   // Headers redraw when a ticket changes state, so a change to the layout itself - an upgrade, a

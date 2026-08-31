@@ -1341,3 +1341,136 @@ test('only the legacy variables actually set are warned about', () => {
   assert.equal(config.deprecations.length, 1)
   assert.match(config.deprecations[0], /^DISCORD_GM_ROLE_ID/)
 })
+
+// The realm is the authority on its own character names. staff-add matched case-insensitively and
+// then stored what was typed, so ".ticket assign 1 heimdalltest" was refused by a core that wanted
+// "Heimdalltest" - and the refusal surfaced only as a delivery retrying for 81 minutes and dying.
+function gmNameCanonicalService(publishedNames) {
+  const stored = { staff: [], repaired: [] }
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = {
+    gmIdentityNames: async () => publishedNames,
+    upsertStaff: async (...args) => { stored.staff.push(args) },
+    canonicaliseGmName: async (...args) => { stored.repaired.push(args) },
+  }
+  return { service, stored }
+}
+
+test('staff-add stores the spelling the realm uses, not the one that was typed', async () => {
+  const { service } = gmNameCanonicalService(['Heimdalltest', 'Helpbot'])
+  assert.equal(await service.assertConfiguredIdentity('heimdalltest'), 'Heimdalltest')
+  assert.equal(await service.assertConfiguredIdentity('HEIMDALLTEST'), 'Heimdalltest')
+  assert.equal(await service.assertConfiguredIdentity('Heimdalltest'), 'Heimdalltest')
+})
+
+test('a name the realm does not know is still refused, with the list', async () => {
+  const { service } = gmNameCanonicalService(['Heimdalltest'])
+  await assert.rejects(() => service.assertConfiguredIdentity('Helpbat'), /not a configured GM identity/)
+})
+
+test('an unpublished identity list stores the input rather than blocking staff-add', async () => {
+  const { service } = gmNameCanonicalService(null)
+  assert.equal(await service.assertConfiguredIdentity('whatever'), 'whatever',
+    'a half-upgraded install could not add staff at all')
+})
+
+test('an existing wrong-cased name is corrected before the command, and repaired in place', async () => {
+  const { service, stored } = gmNameCanonicalService(['Heimdalltest'])
+  assert.equal(await service.canonicalGmNameForCommand('heimdalltest'), 'Heimdalltest')
+  assert.deepEqual(stored.repaired, [['heimdalltest', 'Heimdalltest']],
+    'the stored row was left wrong, so it would be corrected again on every delivery')
+})
+
+test('a name already correct is not needlessly rewritten', async () => {
+  const { service, stored } = gmNameCanonicalService(['Heimdalltest'])
+  assert.equal(await service.canonicalGmNameForCommand('Heimdalltest'), 'Heimdalltest')
+  assert.deepEqual(stored.repaired, [])
+})
+
+test('an unknown name reaches the core to be refused there, not swallowed here', async () => {
+  const { service, stored } = gmNameCanonicalService(['Heimdalltest'])
+  assert.equal(await service.canonicalGmNameForCommand('Nobody'), 'Nobody')
+  assert.deepEqual(stored.repaired, [])
+})
+
+// A delivery that fails keeps retrying for about 81 minutes and is then marked dead. None of that
+// was ever said out loud: Discord showed a ticket claimed while the realm had never been told.
+function announceService(ticket = { public_key: 'DKR-1', discord_channel_id: 'chan-1' }) {
+  const sent = []
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = { getTicket: async () => ticket }
+  service.client = { channels: { fetch: async () => ({ send: async (m) => { sent.push(m.content) } }) } }
+  service.queueBoardChannel = async () => ({ send: async (m) => { sent.push('[board] ' + m.content) } })
+  return { service, sent }
+}
+
+test('giving up on a delivery says so, naming the ticket, the action and the reason', async () => {
+  const { service, sent } = announceService()
+  await service.announceDeliveryTrouble(
+    { id: 2, kind: 'assign_ticket', ticket_id: 1 },
+    new Error('Invalid name specified. Name should be that of an online Gamemaster.'),
+    { state: 'dead', attempts: 12 })
+
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /DKR-1/)
+  assert.match(sent[0], /given up/)
+  assert.match(sent[0], /assign this ticket/)
+  assert.match(sent[0], /Invalid name specified/)
+  // The point of the message: the channel says claimed and the realm disagrees.
+  assert.match(sent[0], /realm did not do this/)
+  // Counted, not asserted. An earlier draft hardcoded "about 80 minutes", which was simply false on
+  // an install that had lowered DELIVERY_MAX_ATTEMPTS - the live test caught it saying so after a
+  // single try.
+  assert.match(sent[0], /after 12 attempts/)
+  assert.doesNotMatch(sent[0], /80 minutes/, 'the message invents a duration it cannot know')
+})
+
+test('a job that died on its first attempt says so, rather than claiming a long wait', async () => {
+  const { service, sent } = announceService()
+  await service.announceDeliveryTrouble({ id: 2, kind: 'assign_ticket', ticket_id: 1 },
+    new Error('nope'), { state: 'dead', attempts: 1 })
+  assert.match(sent[0], /after one attempt/)
+})
+
+test('the trailing carriage return SOAP appends is not quoted back at the operator', async () => {
+  const { service, sent } = announceService()
+  await service.announceDeliveryTrouble({ id: 2, kind: 'assign_ticket', ticket_id: 1 },
+    new Error('Core rejected ".ticket assign 1 X": Ticket not found.&#xD;'), { state: 'dead', attempts: 4 })
+  assert.doesNotMatch(sent[0], /&#xD;/, 'the raw carriage-return entity reached the message')
+  assert.match(sent[0], /Ticket not found\./)
+})
+
+test('the third failure warns quietly; the first two stay silent', async () => {
+  for (const attempts of [1, 2]) {
+    const { service, sent } = announceService()
+    await service.announceDeliveryTrouble({ id: 2, kind: 'assign_ticket', ticket_id: 1 },
+      new Error('boom'), { state: 'queued', attempts })
+    assert.equal(sent.length, 0, `attempt ${attempts} spoke; a blip must stay quiet`)
+  }
+  const { service, sent } = announceService()
+  await service.announceDeliveryTrouble({ id: 2, kind: 'assign_ticket', ticket_id: 1 },
+    new Error('boom'), { state: 'queued', attempts: 3 })
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /still trying/)
+  assert.match(sent[0], /may clear on its own/)
+})
+
+test('a retry that is neither the third nor the last says nothing at all', async () => {
+  const { service, sent } = announceService()
+  for (const attempts of [4, 5, 9, 11]) {
+    await service.announceDeliveryTrouble({ id: 2, kind: 'assign_ticket', ticket_id: 1 },
+      new Error('boom'), { state: 'queued', attempts })
+  }
+  assert.equal(sent.length, 0, 'the retry itself became noisy')
+})
+
+test('a job with no ticket falls back to the queue board', async () => {
+  const { service, sent } = announceService(null)
+  await service.announceDeliveryTrouble({ id: 9, kind: 'gm_command_audit', ticket_id: null },
+    new Error('nope'), { state: 'dead', attempts: 12 })
+  assert.equal(sent.length, 1)
+  assert.match(sent[0], /^\[board\]/)
+  assert.match(sent[0], /background job/)
+})

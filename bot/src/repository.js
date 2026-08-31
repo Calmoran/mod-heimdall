@@ -455,11 +455,24 @@ export class TicketRepository {
     await this.pool.execute("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, leased_until = NULL WHERE id = ? AND lease_owner = ?", [id, this.runId])
   }
 
+  // Returns what it decided, because the caller cannot otherwise tell a retry from a burial - and
+  // a job that has been buried is the one a human needs telling about. Reads the row back rather
+  // than recomputing the IF() here, so there is one definition of "dead" and not two that can drift.
   async failed(id, error, maxAttempts) {
     await this.pool.execute(
       "UPDATE heimdall_delivery SET state = IF(attempts >= ?, 'dead', 'queued'), available_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL LEAST(900, POW(2, attempts) * 5) SECOND), leased_until = NULL, last_error = LEFT(?, 512) WHERE id = ? AND lease_owner = ?",
       [maxAttempts, String(error?.message ?? error), id, this.runId],
     )
+    const [rows] = await this.pool.execute('SELECT state, attempts FROM heimdall_delivery WHERE id = ?', [id])
+    return rows[0] ?? { state: 'queued', attempts: 0 }
+  }
+
+  // Rewrites a GM name to the realm's spelling wherever it is stored. The comparison is
+  // case-insensitive by the column's own collation, so this matches the rows that need fixing and
+  // leaves everything else alone.
+  async canonicaliseGmName(fromName, canonical) {
+    await this.pool.execute('UPDATE heimdall_staff SET gm_name = ? WHERE LOWER(gm_name) = LOWER(?)', [canonical, fromName])
+    await this.pool.execute('UPDATE heimdall_ticket SET claimant_gm_name = ? WHERE LOWER(claimant_gm_name) = LOWER(?)', [canonical, fromName])
   }
 
   async expiredAttachments(limit = 100) {
