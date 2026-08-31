@@ -6,6 +6,8 @@
 ![Linux](https://img.shields.io/badge/Linux-tested-brightgreen)
 ![Docker](https://img.shields.io/badge/Docker-untested-lightgrey)
 
+[![core-build](https://github.com/Calmoran/mod-heimdall/actions/workflows/core-build.yml/badge.svg)](https://github.com/Calmoran/mod-heimdall/actions)
+
 > [!IMPORTANT]
 > **Pre-release (v0.9.0).** Currently tested on Windows only — Linux and Docker support coming soon.
 
