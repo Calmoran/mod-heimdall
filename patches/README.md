@@ -58,5 +58,6 @@ it cannot go unnoticed — the module will not silently half-work.
 
 ### The plan
 
-This is being prepared as a pull request to AzerothCore. If it is accepted, the patch becomes
-unnecessary on any core built after that release and this directory goes away.
+A pull request carrying this change has been submitted to AzerothCore and is awaiting review. If
+it is accepted, the patch becomes unnecessary on any core built after that release and this
+directory goes away.

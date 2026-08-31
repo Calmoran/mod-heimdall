@@ -70,8 +70,9 @@ audit records until the incident is understood.
   the bot's limited MySQL access.
 - **SOAP retrying:** verify loopback SOAP URL/service identity; do not expose it
   publicly or work around the error with direct ticket-table writes.
-- **Player reply rejected or not delivered:** the GM identity is not logged in,
-  the target player is offline, or the identity's account has no
-  `account_access` gmlevel. A `to_game` job left `queued` means a precondition
-  is not met yet and it will retry; it is not an error. Check
-  `.heimdall identity status` on the worldserver console.
+- **Player reply rejected or not delivered:** the GM identity is not logged in
+  — often because someone has a live session on its account, which the module
+  refuses to touch — or the target player is offline. The identity's account
+  needs no GM level; the module supplies that itself. A `to_game` job left
+  `queued` means a precondition is not met yet and it will retry; it is not an
+  error. Check `.heimdall identity status` on the worldserver console.

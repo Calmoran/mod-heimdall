@@ -22,5 +22,5 @@ Discord guild and development realm to verify the following:
   identity's name, and that a player reply to that identity reaches the original
   ticket channel.
 
-Release in this order: development realm and private test guild, staff pilot,
-public server launch, then public source release and module-catalogue submission.
+Every release runs this checklist on a development realm and a private test
+guild before it is tagged; a public realm is never the first place a change runs.
