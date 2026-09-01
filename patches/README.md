@@ -41,13 +41,16 @@ git diff --stat
 
 should show `CharacterHandler.cpp` and `WorldSession.h` changed, 15 insertions and 14 deletions.
 If the patch refuses to apply, your core already contains the change; skip it - do not force it.
-Or look for the class directly:
+Or look for the class directly. Match the definition, not the name - stock AzerothCore already
+forward-declares `class LoginQueryHolder;` in this header, so a search for the bare name prints a
+line whether or not the patch is applied:
 
 ```
-grep -n "class LoginQueryHolder" src/server/game/Server/WorldSession.h
+grep -n "class LoginQueryHolder : public" src/server/game/Server/WorldSession.h
 ```
 
-If that prints a line, you are ready to build. If the module still fails to compile with
+If that prints a line, you are ready to build. If it prints nothing while the bare name does, you
+have an unpatched core. If the module still fails to compile with
 `use of undefined type 'LoginQueryHolder'`, the patch is not applied to the tree you are building.
 
 ### After a core update
