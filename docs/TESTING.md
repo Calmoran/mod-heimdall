@@ -1,6 +1,13 @@
 # Test and release checklist
 
-Run `npm test` and `npm run check` before every release. Then use a separate
+Run `npm test` and `npm run check` before every release. `npm test` includes a smoke test that
+launches the bot as a real process and waits for its startup line, because a release once shipped a
+bot that could not start at all: every other test exercised the service without ever running the
+program.
+
+Before tagging, install from the artifact rather than from your working tree - clone the tag into an
+empty directory, `npm ci --omit=dev`, and start the bot against a test guild. A working tree can
+hold files the tag does not. Then use a separate
 Discord guild and development realm to verify the following:
 
 - Module config and SQL load; no query writes to `gm_ticket` occur.
