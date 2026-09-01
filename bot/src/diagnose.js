@@ -77,8 +77,6 @@ async function main() {
   say('support category', `${config.supportCategoryId ?? 'auto'} (${config.supportCategoryName})`)
   say('mysql', `${config.mysql.user}@${config.mysql.host}:${config.mysql.port}/${config.mysql.database}`)
   say('mysql password', mask(config.mysql.password))
-  say('soap url', config.soap.url)
-  say('soap user / password', `${config.soap.user} / ${mask(config.soap.password)}`)
   say('archive dir', config.archiveDir)
   say('instance id', config.instanceId)
 

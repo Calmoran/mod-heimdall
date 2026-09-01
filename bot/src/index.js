@@ -65,7 +65,7 @@ async function main() {
   // line by any route - including inside a driver's error text - is replaced before it is written.
   const logger = new Logger({
     ...config.log,
-    secrets: [config.token, config.mysql.password, config.soap.password],
+    secrets: [config.token, config.mysql.password],
   })
   // The run id and pid are logged because "am I running twice?" has to be answerable from the log
   // alone. Without them a log holding nine "Heimdall bot starting" lines says nothing about which
