@@ -102,6 +102,14 @@ changed what they do.
   `DELIVERY_MAX_ATTEMPTS`: both halves fail a job by the same rule, and matching values are what
   make the bot's warning and dead letter describe the same job.
 
+  **Nothing enforces the match** — the bot cannot read `heimdall.conf` and the module cannot read
+  `.env`, so two different numbers are accepted in silence. The two halves never fight over a row:
+  the module gives up on the jobs it runs against the realm, the bot on the ones it delivers to
+  Discord. What drift costs is one system that answers *how long before a stuck job is reported*
+  two different ways depending on which direction the job was going, and a retry window — roughly
+  81 minutes at the default 12, on the shared backoff — that then holds for only one half of it.
+  Change one, change the other, and restart both.
+
 ## How configuration changes are handled
 
 A setting an operator has already set is a promise. Heimdall keeps it, and these

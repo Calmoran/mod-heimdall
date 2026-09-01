@@ -5,6 +5,7 @@ import mysql from 'mysql2/promise'
 
 import { ArchiveStore } from './archive.js'
 import { loadConfig } from './config.js'
+import { resolveEnvFile } from './env.js'
 import { Logger } from './logger.js'
 import { HeimdallService, ticketAdminCommand } from './discord.js'
 import { TicketRepository } from './repository.js'
@@ -13,7 +14,7 @@ import { TicketRepository } from './repository.js'
 // duplicated here, so it cannot disagree with what npm believes is installed.
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
-function loadEnvironmentFile(filename = process.env.HEIMDALL_ENV_FILE) {
+function loadEnvironmentFile(filename = resolveEnvFile()) {
   if (!filename || !fs.existsSync(filename)) return
   for (const line of fs.readFileSync(filename, 'utf8').split(/\r?\n/)) {
     if (!line || /^\s*#/.test(line)) continue

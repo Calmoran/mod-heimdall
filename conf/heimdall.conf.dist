@@ -62,7 +62,8 @@ Heimdall.DeliveryPollSeconds = 1
 # How many times a queued realm command is attempted before it is given up on and reported as a
 # dead letter in Discord. Range 1-100. Keep this equal to the bot's DELIVERY_MAX_ATTEMPTS: both
 # halves fail a job by the same rule, and matching values are what make the bot's warning and
-# dead-letter describe the same job the realm gave up on.
+# dead-letter describe the same job the realm gave up on. Nothing enforces the match - the module
+# cannot read the bot's .env - so changing one means changing the other by hand.
 Heimdall.DeliveryMaxAttempts = 12
 
 # Comma-separated character names, one per GM identity. Each is held in-world with no game
@@ -71,6 +72,12 @@ Heimdall.DeliveryMaxAttempts = 12
 # module only polls tickets. A name that does not exist is warned about and skipped.
 # Use characters on accounts nobody plays: the module refuses to take over an account that is
 # connected, and stands down if a client later logs in on one.
+#
+# Give that account gmlevel 1 (`account set gmlevel <account name> 1 -1`). Whispering does not need
+# it - the module gives game-master rights to the session it creates - but claiming a ticket runs
+# `.ticket assign`, and the core checks the stored gmlevel of the account behind the GM name being
+# assigned, never the session. Below 1 it refuses with "Invalid name specified", which points at
+# neither the cause nor the fix. See docs/INSTALL.md.
 Heimdall.GmIdentities = ""
 
 #

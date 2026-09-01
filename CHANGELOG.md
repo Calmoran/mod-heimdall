@@ -3,6 +3,55 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 1.1.3 — 2026-09-01
+
+Documentation, and one small thing the bot does differently. The install guide told you the GM
+identity could live on a plain account. It cannot, and the way that goes wrong is worth reading
+before it happens to you.
+
+### Fixed
+
+- **The install guide was wrong about GM level, and it cost a first install its Claim button.**
+  Step 6 said in bold that the identity's account needs no GM level, on the reasoning that the
+  module gives game-master rights to the session it creates. It does — and whispering works
+  perfectly on a plain account, which is exactly why this hid. But claiming an in-game ticket runs
+  `.ticket assign`, and the core checks the **account's** stored gmlevel in `account_access`, never
+  the session. Below 1, it refuses with
+
+  ```
+  Invalid name specified. Name should be that of an online Gamemaster.
+  ```
+
+  which names neither the real cause nor the right thing to look at: the name is fine, and the
+  character need not be online. The name being checked is the one the claiming staff member is
+  rostered under, which on most installs is the identity character too.
+
+  The guide now says to give that account gmlevel 1 — Moderator, the lowest level the check
+  accepts — and there is a troubleshooting entry keyed on the error text, in `docs/INSTALL.md`.
+  **An existing install that claims tickets successfully already satisfies this and needs no
+  change.**
+
+- **The bot reads the `.env` beside it when `HEIMDALL_ENV_FILE` is unset.** Every launcher sets that
+  variable; `node src/index.js` by hand does not, and the resulting failure pointed the wrong way —
+  no file had been opened, so configuration validation reported every required value as missing,
+  which reads like a broken `.env` rather than an unread one.
+
+### Documentation
+
+- `docs/SECURITY.md` and the README now draw the boundary between the three actors precisely, which
+  matters more now that the guide asks for a GM level: the bot holds no realm credentials and cannot
+  execute anything; the GM identity is a realm account operated only by the module inside the
+  worldserver, its password nowhere in the bot's configuration; and the one privilege Heimdall asks
+  of your realm is gmlevel 1 on the GM characters staff are rostered under.
+- The Discord application's three gateway intents are each explained, including what goes quietly
+  wrong without **Message Content**: transcripts keep authors, timestamps and attachments, and lose
+  the words.
+- Docker: a bot that fails at startup is relaunched into its own instance lock, so the log fills
+  with `Another ticket bot instance is already running` and the real error appears once a minute
+  among them. Read the oldest distinct error, not the last.
+- `DELIVERY_MAX_ATTEMPTS` and `Heimdall.DeliveryMaxAttempts` must match, and nothing enforces it —
+  the guide now says what drifting apart actually costs.
+
 ## 1.1.2 — 2026-09-01
 
 Heimdall asks your server for one permission fewer, and a fresh install no longer opens with a

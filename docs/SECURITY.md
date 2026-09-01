@@ -4,10 +4,21 @@
   logs, screenshots, and public channels. Use a mode-600 environment file.
 - Run as the dedicated `heimdall` service account. The supplied unit uses
   restart protection and filesystem hardening; review it for your distribution.
-- **The bot holds no game account and no remote command channel.** It asks for one of a fixed list
-  of actions by writing a row; the module composes and runs the command inside the worldserver. A
-  row cannot express a command that is not on the list, so this boundary is structural rather than
-  a matter of trusting the bot.
+- **The bot holds no realm credentials and no remote command channel.** Its environment file
+  contains no game account, and it cannot execute anything. It asks for one of a fixed list of
+  actions by writing a row - action and arguments as separate fields - and the module composes and
+  runs the command inside the worldserver. A row cannot express a command that is not on the list,
+  so this boundary is structural rather than a matter of trusting the bot.
+- **The GM identity is a realm account, and it is the module's, not the bot's.** The module logs
+  its character into the world with no client attached, from inside the worldserver. That
+  account's password appears nowhere in the bot's configuration and nowhere in this repository, so
+  a fully compromised bot cannot log into it, cannot speak as it, and cannot raise its own
+  privileges - the most it can do is queue an action from the list against a ticket that exists.
+- **The one realm privilege Heimdall asks for is gmlevel 1 on the GM characters staff are rostered
+  under**, because the core refuses to assign a ticket to a character whose account is below it.
+  Moderator is the lowest level that satisfies the check and nothing here uses more. That privilege
+  sits on realm accounts, granted by your own GM commands; Heimdall neither stores it nor grants
+  it, and the bot never sees it.
 - Keep MySQL bound to loopback. Grant the bot only the module table privileges shown in
   `deploy/mysql-grants.sql`; do not grant broad Characters, Auth, or World access. That account is
   the whole of the bot's access to your realm.

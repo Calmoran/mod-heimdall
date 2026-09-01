@@ -23,11 +23,21 @@ a wrong password.
 ## 2. Create the Discord application
 
 In the Discord Developer Portal, create a bot application and enable these
-gateway intents:
+gateway intents. Heimdall asks the gateway for all three at connect time, and Discord closes the
+connection on an intent the application has not been granted - so a missing one is not a degraded
+feature, it is a bot that will not start:
 
-- Guilds
-- Guild Messages
-- **Message Content** (privileged; needed to archive normal ticket messages)
+- **Guilds** - the bot has to see the guild, its channels and its roles at all. Nothing works
+  without it.
+- **Guild Messages** - ticket channels and staff threads deliver their messages. Without it staff
+  discussion never reaches Heimdall and nothing is transcribed.
+- **Message Content** (privileged) - message *bodies*. Discord delivers a message event without its
+  text unless this is on, so the failure is quiet and specific: transcripts and the private archive
+  fill with messages that have authors, timestamps and attachments, and no words. It is a toggle on
+  the same portal page; a self-hosted bot in one guild is well under the 100-server threshold where
+  Discord starts asking applications to justify it.
+
+A start that dies with `Used disallowed intents` means one of these is off in the portal.
 
 Invite it with exactly the permissions below and no others. These are the same names, in the same
 two groups, that the bot prints at startup if one is missing, so a startup warning and this guide
@@ -163,9 +173,11 @@ listener; it connects out to Discord and locally to MySQL.
 
 ### Windows — tested
 
-`run-bot.cmd` sets `HEIMDALL_ENV_FILE` to the `.env` beside it and starts the bot. Run it from a
-terminal first and watch the startup lines; once it is behaving, wrap it with NSSM or Task Scheduler
-so it survives a reboot. `deploy/heimdall-bot.service` is a Linux unit and does not apply.
+`run-bot.cmd` sets `HEIMDALL_ENV_FILE` to the `.env` beside it and starts the bot - which is also
+where the bot looks when nothing sets that variable, so `node src/index.js` from the `bot` directory
+finds the same file. Run it from a terminal first and watch the startup lines; once it is behaving,
+wrap it with NSSM or Task Scheduler so it survives a reboot. `deploy/heimdall-bot.service` is a
+Linux unit and does not apply.
 
 ### Linux — tested
 
@@ -188,6 +200,12 @@ meant to.
 To watch the first start before committing to a unit, run it directly with
 `HEIMDALL_ENV_FILE=/path/to/.env node src/index.js` and read the startup lines.
 
+**`HEIMDALL_ENV_FILE` is how the bot is told where its environment file is**, and every launcher
+here sets it. Started by hand with the variable unset, the bot falls back to the `.env` beside it -
+`bot/.env` in this clone, which is where the Windows launcher points anyway. Anywhere else, name the
+file: a bot whose environment file was never opened fails with every required value reported
+missing, which reads like a broken `.env` rather than an unread one.
+
 ### Docker — tested
 
 Run against AzerothCore's own `docker-compose.yml` on Docker Desktop for Windows, with the bot in
@@ -198,7 +216,8 @@ The module half needs nothing special: clone this repository into the core's `mo
 core patch, and `docker compose up -d --build`. The build context includes `modules/`, so the module
 is compiled in, and the schema imports itself through `ac-db-import` like any other module's SQL.
 
-Four things are Docker-specific, and three of them will stop you.
+Five things are Docker-specific: three will stop you, one will point you at the wrong problem
+entirely, and one only bites if your database is somewhere unexpected.
 
 **The database port collides.** The shipped compose publishes MySQL on host port **3306**, which is
 whatever MySQL you already have installed. Compose reads a `.env` beside `docker-compose.yml`:
@@ -231,6 +250,22 @@ account still reaches only the seven `heimdall_*` tables.
 **Addresses are service names.** `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`. `127.0.0.1` in a
 container is the container itself. If MySQL runs on the host instead, `host.docker.internal` reaches
 it on Docker Desktop; on Linux that needs `--add-host=host.docker.internal:host-gateway`.
+
+**A bot that cannot start looks like a bot that is already running.** With `restart:
+unless-stopped`, a container that fails during startup is relaunched every few seconds, and each
+relaunch finds the previous one's 60-second instance lock still held. The log then fills with
+`Another ticket bot instance is already running` - one line per attempt, dozens per minute - and the
+real error scrolls past once and never again. Reading the last line sends you hunting for a second
+bot that does not exist.
+
+Read the **oldest distinct** error in the log, not the last one:
+
+```
+docker compose logs heimdall-bot | grep -v 'already running' | head -30
+```
+
+The lock is not the fault; it is working exactly as designed, and it is what keeps two bots off one
+database. It is only noisy about it.
 
 The bot container needs to reach the database and nothing else — it sends the realm no commands, so
 there is no second address to get right and no port to publish for it.
@@ -354,7 +389,11 @@ which is the intended outcome but not a migration strategy.
 3. Every configured staff and admin role can see an unclaimed ticket. A player can
    see only their own Discord ticket.
 4. Add a staff mapping with `/ticket staff-add`. Confirm that an eligible role
-   without a mapping cannot claim or reply.
+   without a mapping cannot claim or reply. **The GM character you map must be on an account with
+   gmlevel 1 or higher**, or claiming an *in-game* ticket fails with the core's
+   `Invalid name specified` — see the entry in
+   [INSTALL.md](INSTALL.md#claiming-a-ticket-fails-with-invalid-name-specified). Discord-opened
+   tickets are unaffected; they never touch the realm.
 5. Claim a ticket. Confirm only the claimant, Admin, bot, and creator can see it.
 6. Add a normal message and attachment. Confirm it is archived privately and is
    not publicly reachable.

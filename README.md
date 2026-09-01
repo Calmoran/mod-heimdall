@@ -119,9 +119,11 @@ an automatic realm tag is never longer than `R255`.
 **What Heimdall does not do:** it never writes to `gm_ticket` — every in-game change goes through
 documented GM commands, run by the module inside the worldserver. The bot has no way to send the
 realm a command of its own choosing: it asks for one of a fixed list of actions, and the module
-composes the command itself. It does not give the bot access to player data; the bot's database
-account reaches only the seven `heimdall_*` tables. It does not link Discord accounts to game
-accounts, so it cannot offer self-service actions on a character. It does not send item or gold
+composes the command itself. The GM identity is a realm account, but it is the module's rather than
+the bot's — its password is in no part of the bot's configuration, and a fully compromised bot could
+neither log into it nor speak as it. It does not give the bot access to player data; the bot's
+database account reaches only the seven `heimdall_*` tables. It does not link Discord accounts to
+game accounts, so it cannot offer self-service actions on a character. It does not send item or gold
 compensation. And it needs one small core patch to hold a GM identity in the world, which ships with
 the module and changes no behaviour.
 

@@ -72,3 +72,35 @@ test('the bot starts far enough to prove its startup wiring', async () => {
   assert.match(output, /Heimdall bot starting/,
     `the bot never reached its startup line (${exit}):\n${output.slice(0, 800)}`)
 })
+
+// The other half of that wiring: which file startup opens when nothing names one.
+//
+// This cannot be covered by launching the bot the way the test above does. The fallback resolves to
+// the .env beside this repository, which on a working install holds real credentials - a test that
+// started a bot on them would take the running bot's place on its own database. So the no-variable
+// path is exercised in a real Node process that resolves the path and stops there, which is the
+// part that was wrong: nothing was opened, and every required value was then reported missing as
+// though the file were at fault.
+function resolveIn(environment) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath,
+      ['-e', "import('./src/env.js').then((m) => process.stdout.write(m.resolveEnvFile()))"],
+      { cwd: BOT_DIR, env: environment })
+    let output = ''
+    child.stdout.on('data', (chunk) => { output += chunk })
+    child.stderr.on('data', (chunk) => { output += chunk })
+    child.on('error', reject)
+    child.on('exit', (code) => (code === 0 ? resolve(output) : reject(new Error(output))))
+  })
+}
+
+test('with no HEIMDALL_ENV_FILE set, startup reads the .env beside the bot', async () => {
+  const environment = { ...process.env }
+  delete environment.HEIMDALL_ENV_FILE
+  assert.equal(await resolveIn(environment), path.join(BOT_DIR, '.env'))
+})
+
+test('HEIMDALL_ENV_FILE still wins when it is set', async () => {
+  const named = path.join(os.tmpdir(), 'somewhere-else.env')
+  assert.equal(await resolveIn({ ...process.env, HEIMDALL_ENV_FILE: named }), named)
+})

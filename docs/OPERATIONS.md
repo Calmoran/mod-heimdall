@@ -3,7 +3,9 @@
 ## Staff operations
 
 Administrators use `/ticket staff-add`, `/ticket staff-remove`, and
-`/ticket staff-list` to maintain mappings. Any staff member can run
+`/ticket staff-list` to maintain mappings. A mapped GM character needs gmlevel 1
+or higher on its account, or claiming an in-game ticket is refused by the realm;
+the troubleshooting section below has the error text. Any staff member can run
 `/ticket refresh` inside a ticket channel (or with a ticket id from anywhere) to
 redraw its header and controls — useful after an upgrade, since headers
 otherwise only redraw when the ticket changes state. Eligible Discord role plus an enabled
@@ -75,7 +77,15 @@ audit records until the incident is understood.
   it with direct ticket-table writes.
 - **Player reply rejected or not delivered:** the GM identity is not logged in
   — often because someone has a live session on its account, which the module
-  refuses to touch — or the target player is offline. The identity's account
-  needs no GM level; the module supplies that itself. A `to_game` job left
-  `queued` means a precondition is not met yet and it will retry; it is not an
-  error. Check `.heimdall identity status` on the worldserver console.
+  refuses to touch — or the target player is offline. Whispering needs no GM
+  level on the identity's account; the module supplies that to the session. A
+  `to_game` job left `queued` means a precondition is not met yet and it will
+  retry; it is not an error. Check `.heimdall identity status` on the
+  worldserver console.
+- **Claim fails with "Invalid name specified. Name should be that of an online
+  Gamemaster.":** the account behind the claiming staff member's rostered GM
+  character is below gmlevel 1. `.ticket assign` reads the stored level from
+  `account_access`, never the session, and the message names neither the real
+  cause nor the right thing to check. Set it from the worldserver console with
+  `account set gmlevel <account name> 1 -1`; the retrying job then succeeds on
+  its own. Full entry in `docs/INSTALL.md`.

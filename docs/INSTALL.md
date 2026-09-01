@@ -62,8 +62,24 @@
       off their own character — but it means an identity sharing your own account stops working the
       moment you log in to play.
 
-      That account needs **no GM level**. The module gives game-master rights to the session it
-      creates, so a plain account is enough, and it is one less administrator credential to guard.
+      **Give that account gmlevel 1**, from the worldserver console:
+
+      ```
+      account set gmlevel <account name> 1 -1
+      ```
+
+      Whispering does not need it. The module gives game-master rights to the session it creates, so
+      an identity on a plain account holds, whispers, and hears the player answer back — which is
+      exactly why a missing level hides until the first **Claim**. Claiming an in-game ticket runs
+      `.ticket assign <ticket> <GM name>`, and the core refuses to assign a ticket to a character
+      whose *account* is below gmlevel 1: it reads the stored level out of `account_access` and never
+      looks at the session. The name it checks is the one the claiming staff member is rostered under
+      (`/ticket staff-add`), which on most installs is this same character — so this is the account
+      that gets checked. If you roster staff under their own GM characters, each of those accounts
+      needs the level, and this one still needs nothing beyond it.
+
+      `1` is Moderator, not Administrator — the lowest level the check accepts, and nothing here
+      uses more. It is still one account fewer with administrator rights on your realm.
    3. Log in with the game client **on that account**, create the character your GM identity will
       use, then log out again. An ordinary character; the module supplies GM mode at login. The
       account has to be free for the module to use it.
@@ -189,6 +205,37 @@ their transcripts are in the database and archive rather than in Discord.
 `Heimdall.GmIdentities` is empty, which is the shipped default. Set it to a character that exists on
 the realm and restart the worldserver. The startup log says so explicitly, and `/ticket staff-add`
 refuses a name the realm has not accepted rather than letting it fail later, mid-conversation.
+
+### Claiming a ticket fails with "Invalid name specified"
+
+Symptom: whispers work in both directions, the identity is held, everything looks healthy — and then
+**Claim** on an in-game ticket leaves the realm's own copy unassigned. The `assign_ticket` row in
+`heimdall_delivery` carries this in `last_error`, and it is the core's message, not Heimdall's:
+
+```
+Invalid name specified. Name should be that of an online Gamemaster.
+```
+
+It misleads twice. The name is almost certainly right, and the character does not have to be online.
+What `.ticket assign` actually checks is the **account** behind that character: it reads the stored
+gmlevel from `account_access` and refuses anything below 1. An account with no GM level fails here
+and nowhere else, which is why the rest of the install looks fine.
+
+The name being checked is the GM name the claiming staff member is rostered under
+(`/ticket staff-add`) — not their Discord account, and not necessarily the GM identity, though on a
+small install those are usually the same character. Fix it from the worldserver console:
+
+```
+account set gmlevel <account name> 1 -1
+```
+
+`1` is Moderator, which is the whole requirement; `-1` means every realm. Nothing needs restarting —
+the core reads that level from the database on each assignment.
+
+You do not have to press Claim again if you fix it promptly: the queued job retries on its own, with
+backoff, for about 81 minutes, and the next attempt succeeds. If it has already been reported as a
+dead letter, nothing else is broken — the ticket is claimed in Heimdall, replies and closure work
+normally, and only the core's own `assignedTo` field stays empty for that one ticket.
 
 ### A character cannot log in to the test realm
 

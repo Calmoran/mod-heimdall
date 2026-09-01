@@ -10,6 +10,7 @@ import process from 'node:process'
 import mysql from 'mysql2/promise'
 
 import { loadConfig } from './config.js'
+import { resolveEnvFile } from './env.js'
 
 function mask(value) {
   if (value === undefined || value === null || value === '') return '(not set)'
@@ -27,7 +28,7 @@ function packageVersion() {
   }
 }
 
-function loadEnvironmentFile(filename = process.env.HEIMDALL_ENV_FILE) {
+function loadEnvironmentFile(filename = resolveEnvFile()) {
   if (!filename || !fs.existsSync(filename)) return
   for (const line of fs.readFileSync(filename, 'utf8').split(/\r?\n/)) {
     if (!line || /^\s*#/.test(line)) continue
