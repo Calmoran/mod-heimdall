@@ -3,6 +3,25 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 1.1.3 — 2026-09-01
+
+**Upgrade from 1.1.2 if you are installing fresh: 1.1.2 cannot create its own Discord channels.**
+An existing install is unaffected — its channels already exist.
+
+### Fixed
+
+- **A bot invited under 1.1.2's narrower permission set could not build its layout.** 1.1.2 stopped
+  asking for Manage Messages, but left it in the set of permissions Heimdall *grants* to admin roles
+  and to its own role in every channel overwrite. Discord refuses to let a bot grant a permission it
+  does not itself hold, so provisioning stopped partway with `Missing Permissions` — five channels
+  created, then nothing.
+
+  It only appears on a bot invited with the 1.1.2 permission set, which is why it survived a full
+  Windows lifecycle: that bot had been invited under the older, wider set and could still grant what
+  it was asked to grant. A first Linux install caught it within minutes.
+
+  Nothing is granted that is not also asked for, and there is now a test holding that line.
+
 ## 1.1.2 — 2026-09-01
 
 Heimdall asks your server for one permission fewer, and a fresh install no longer opens with a

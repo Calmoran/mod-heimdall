@@ -108,7 +108,12 @@ export const REQUIRED_PERMISSIONS = [
 // rather than left showing buttons that no longer route anywhere.
 const PANEL_VERSION = '2'
 const STAFF_PERMISSIONS = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory]
-export const ADMIN_PERMISSIONS = [...STAFF_PERMISSIONS, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages]
+// Every permission here is GRANTED to admin roles (and to the bot's own role) in channel
+// overwrites, and Discord refuses to let a bot grant a permission it does not itself hold. So this
+// list may never contain anything outside the invite set - Manage Messages was left here when 1.1.2
+// dropped it from that set, and the first bot invited under the narrower set could not create its
+// own channels at all.
+export const ADMIN_PERMISSIONS = [...STAFF_PERMISSIONS, PermissionFlagsBits.ManageChannels]
 
 function ticketIdFrom(customId) {
   const value = Number.parseInt(customId.split(':').at(-1), 10)

@@ -679,6 +679,24 @@ test('a correctly configured bot role is accepted as given', async () => {
 // warning that was not true. The board is the only message that will ever sit in that channel, so
 // pinning bought nothing and was removed, taking the Manage Messages permission with it. This holds
 // that line: the board is posted and remembered, and nothing tries to pin it.
+// 1.1.2 dropped Manage Messages from the invite set but left it in ADMIN_PERMISSIONS, which is
+// GRANTED to admin roles and to the bot's own role in every channel overwrite. Discord refuses to
+// let a bot grant a permission it does not hold, so the first bot invited under the narrower set
+// could not create its own channels: five went in, then "Missing Permissions". Every existing test
+// passed, because the bots that ran them had been invited under the older, wider set.
+//
+// The invariant is simple and worth holding: nothing may be granted that is not also asked for.
+test('every permission Heimdall grants is one it actually asks for', () => {
+  const asked = new Set(REQUIRED_PERMISSIONS.map((entry) => entry.flag))
+  for (const [label, list] of [['ADMIN_PERMISSIONS', ADMIN_PERMISSIONS]]) {
+    for (const flag of list) {
+      assert.ok(asked.has(flag),
+        `${label} grants a permission missing from REQUIRED_PERMISSIONS (flag ${flag}). `
+        + 'Discord will refuse the overwrite with "Missing Permissions" and the bot cannot build its channels.')
+    }
+  }
+})
+
 test('the queue board is posted and remembered, and never pinned', async () => {
   const stored = {}
   const posted = { id: 'board-1', pin: async () => { assert.fail('the queue board must not be pinned') } }
