@@ -49,12 +49,11 @@ These each break one feature, and Heimdall will still start without them:
 
 - Manage Threads — archived staff threads cannot be reopened, so older tickets become unusable
 - Manage Webhooks — in-game messages post as the bot instead of under the player's character name
-- Manage Messages — the queue board cannot be pinned
 - Mention @everyone, @here and All Roles — with an empty staff roster, Heimdall cannot add
   administrators to a ticket thread. Only needed while your administrator role is not itself marked
   mentionable, which is the default. Making that role mentionable instead is the narrower choice.
 
-That set is `361582783504` if you would rather build the invite URL yourself. Add the
+That set is `361582775312` if you would rather build the invite URL yourself. Add the
 `applications.commands` scope alongside `bot` so the `/ticket` commands can register — that is a
 scope, not a permission, and it governs the commands rather than the bot's access to your server.
 

@@ -674,23 +674,29 @@ test('a correctly configured bot role is accepted as given', async () => {
   assert.equal(service.botRoleId, 'managed-role')
 })
 
-// The pin fails on the run that creates the channel because Discord has not finished applying the
-// overwrites yet. It is a propagation race, not a permission fault, and it greeted every fresh
-// install with an alarming warning that was not true.
-test('the queue board pin is retried once before it is reported as a failure', async () => {
-  const warnings = []
+// Heimdall used to pin the queue board, and the pin lost a race against Discord applying the new
+// channel's overwrites - so every fresh install was greeted by an alarming "Missing Permissions"
+// warning that was not true. The board is the only message that will ever sit in that channel, so
+// pinning bought nothing and was removed, taking the Manage Messages permission with it. This holds
+// that line: the board is posted and remembered, and nothing tries to pin it.
+test('the queue board is posted and remembered, and never pinned', async () => {
+  const stored = {}
+  const posted = { id: 'board-1', pin: async () => { assert.fail('the queue board must not be pinned') } }
   const service = Object.create(HeimdallService.prototype)
-  service.logger = { error: () => {}, warn: (line) => warnings.push(line), info: () => {} }
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.queueBoardChannel = async () => ({ send: async () => posted, messages: { fetch: async () => null } })
+  service.queueBoardEmbed = () => ({})
+  service.nudgeUnclaimed = async () => {}
+  service.repository = {
+    queueSnapshot: async () => [],
+    getSetting: async () => null,
+    setSetting: async (key, value) => { stored[key] = value },
+  }
 
-  let attempts = 0
-  const flaky = { pin: async () => { attempts += 1; if (attempts === 1) throw new Error('Missing Permissions') } }
-  assert.equal(await service.pinWithRetry(flaky, 'Ticket queue board'), true)
-  assert.equal(attempts, 2)
-  assert.equal(warnings.length, 0, 'a recovered pin must not warn')
-
-  const broken = { pin: async () => { throw new Error('Missing Permissions') } }
-  assert.equal(await service.pinWithRetry(broken, 'Ticket queue board'), false)
-  assert.match(warnings[0], /Could not pin the queue board/)
+  const message = await service.refreshQueueBoard()
+  assert.equal(message, posted)
+  assert.equal(stored['discord.queue_message_id'], 'board-1', 'the board id must be remembered')
+  assert.equal(typeof service.pinWithRetry, 'undefined', 'the pin helper should be gone, not merely unused')
 })
 
 // The bug this exists for: validateGmName is a format check, so a GM name that simply does not

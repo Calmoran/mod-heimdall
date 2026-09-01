@@ -98,8 +98,6 @@ export const REQUIRED_PERMISSIONS = [
     breaks: 'archived staff threads cannot be reopened, so older tickets become unusable' },
   { flag: PermissionFlagsBits.ManageWebhooks, name: 'Manage Webhooks', fatal: false,
     breaks: "in-game messages post as the bot instead of under the player's character name" },
-  { flag: PermissionFlagsBits.ManageMessages, name: 'Manage Messages', fatal: false,
-    breaks: 'the queue board cannot be pinned' },
   // Needed only when the administrator role is not itself marked mentionable, which is the default.
   // Without it the empty-roster fallback renders its mention as plain text and adds nobody - the
   // silent no-op the fallback exists to prevent.
@@ -796,30 +794,9 @@ export class HeimdallService {
     } else {
       message = await channel.send({ embeds: [embed], allowedMentions: ALLOWED_MENTIONS })
       await this.repository.setSetting('discord.queue_message_id', message.id)
-      await this.pinWithRetry(message, 'Ticket queue board')
     }
     await this.nudgeUnclaimed(channel, rows)
     return message
-  }
-
-  // On the run that creates the queue channel, the pin is attempted before Discord has finished
-  // applying the channel's new overwrites, and fails with "Missing Permissions" - which is not true
-  // and reads alarmingly on a first install. It succeeds on the next start with nothing changed, so
-  // it is a propagation race rather than a permission fault. One retry is enough.
-  async pinWithRetry(message, reason) {
-    try {
-      await message.pin(reason)
-      return true
-    } catch (firstError) {
-      await new Promise((resolve) => { setTimeout(resolve, 2_000) })
-      try {
-        await message.pin(reason)
-        return true
-      } catch (error) {
-        this.logger.warn(`Could not pin the queue board: ${error.message} (first attempt: ${firstError.message})`)
-        return false
-      }
-    }
   }
 
   // Off unless an operator asks for it: an existing install should not start being pinged by a

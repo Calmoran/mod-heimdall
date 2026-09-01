@@ -3,6 +3,40 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 1.1.2 — 2026-09-01
+
+Heimdall asks your server for one permission fewer, and a fresh install no longer opens with a
+warning that was never true.
+
+### Changed
+
+- **Heimdall no longer asks for Manage Messages.** It wanted it for one thing: pinning the queue
+  board. The board is the only message that will ever sit in that channel, so the pin bought nothing
+  and has been removed, and the permission went with it.
+
+  **The invite permission set is now `361582775312`, was `361582783504`.** Nothing needs doing to an
+  existing install - it simply holds a permission Heimdall no longer uses, and you may remove it at
+  your leisure. New installs ask for less.
+
+### Fixed
+
+- **A fresh install greeted you with `Could not pin the queue board: Missing Permissions`.** It was
+  not a permission fault: the pin was attempted before Discord had finished applying the new
+  channel's overwrites. Worse, the code claimed it would fix itself on the next start, and it could
+  not - the pin was only ever attempted on the run that *created* the board, so once the message id
+  was stored no further attempt was made and the board stayed unpinned for good.
+
+- Documentation: the install guide now explains what happens if you delete and recreate the bot's
+  Discord application. Channel permissions name the application's managed role, and that role dies
+  with it, so a replacement application cannot see - or repair - the channels its predecessor made.
+  Deleting them and letting the bot rebuild is the cure.
+
+- `.env.example` now shows a Windows answer for `ARCHIVE_DIR` and `LOG_DIR` beside the Linux
+  defaults, instead of leaving Windows operators with `/var/lib/heimdall/archive` and a `LOG_DIR`
+  of `.` that lands wherever the launcher happened to run.
+
+No module changes: **the worldserver does not need rebuilding for this release.**
+
 ## 1.1.1 — 2026-09-01
 
 **Upgrade from 1.1.0 immediately: the bot in 1.1.0 cannot start.**

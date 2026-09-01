@@ -169,6 +169,21 @@ If you pinned any channel id in `.env`, blank it back to the placeholder first â
 never self-healed, by design, and the bot will refuse to start while it names a channel that no
 longer exists.
 
+### The bot cannot see channels after you deleted and recreated its Discord application
+
+Deleting a Discord application orphans every channel it created. A channel's permission overwrites
+name the application's *managed role*, and that role is deleted with the application - so a
+replacement application is named in none of them. It cannot see those channels, and it cannot repair
+them either, because Discord does not let you manage a channel you cannot view. The symptoms are
+`Could not secure category ...: Missing Access` and a refusal to start naming the missing **View
+Channels**.
+
+The cure is to delete the categories and channels Heimdall created and let the new bot rebuild them
+on its next start. The stored ids self-heal - the bot notices each one no longer resolves and creates
+a replacement - **provided you have not pinned them in `.env`**, since a pinned id is never
+self-healed by design. Open tickets get their channels back on the next poll; closed ones do not, and
+their transcripts are in the database and archive rather than in Discord.
+
 ### Whispers are refused with "is not a configured GM identity"
 
 `Heimdall.GmIdentities` is empty, which is the shipped default. Set it to a character that exists on
