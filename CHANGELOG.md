@@ -3,6 +3,23 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 1.1.1 — 2026-09-01
+
+**Upgrade from 1.1.0 immediately: the bot in 1.1.0 cannot start.**
+
+### Fixed
+
+- **The bot exited before it logged anything, on every start.** 1.1.0 removed the SOAP client, but
+  two references to its configuration survived, and one of them runs before everything else: the log
+  writer is built from the list of secrets to redact, and that list named the SOAP password. Every
+  start died with `Cannot read properties of undefined (reading 'password')`. On Windows, launched
+  from `run-bot.cmd`, the console window opens and closes with the message still in it.
+
+  There is no workaround in 1.1.0 and no configuration that avoids it. Pull this release; nothing
+  else needs to change, and the realm module is unaffected.
+
+  `diagnose.js` printed the same values and is fixed with it.
+
 ## 1.1.0 — 2026-08-31
 
 The bot no longer holds any credential for the realm. This is the release to point at if anyone asks
