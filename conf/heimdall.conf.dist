@@ -47,10 +47,23 @@ Heimdall.FirstRunImport = "open"
 # Seconds between read-only scans of AzerothCore's gm_ticket table. Minimum 1; lower is raised.
 Heimdall.TicketPollSeconds = 15
 
-# Seconds between attempts to deliver queued player-facing messages after login. Minimum 1; lower
-# is raised. A queued whisper waits until the player is online and the GM identity is held - it is
-# not lost, and "still queued" is not an error.
-Heimdall.DeliveryPollSeconds = 5
+# Seconds between attempts to deliver queued work: player-facing whispers, and the ticket and GM
+# actions the companion bot asks for. Minimum 1; lower is raised.
+#
+# This is a responsiveness setting, not just a retry cadence: the companion bot asks for ticket and
+# GM actions by queueing them, and this poll is what performs them, so a staff member pressing
+# Revive or Close waits on this interval. One second is the default for that reason. Raising it
+# makes every ticket control slower by the amount you raise it.
+#
+# A queued whisper still waits until the player is online and the GM identity is held - it is not
+# lost, and "still queued" is not an error.
+Heimdall.DeliveryPollSeconds = 1
+
+# How many times a queued realm command is attempted before it is given up on and reported as a
+# dead letter in Discord. Range 1-100. Keep this equal to the bot's DELIVERY_MAX_ATTEMPTS: both
+# halves fail a job by the same rule, and matching values are what make the bot's warning and
+# dead-letter describe the same job the realm gave up on.
+Heimdall.DeliveryMaxAttempts = 12
 
 # Comma-separated character names, one per GM identity. Each is held in-world with no game
 # client attached so players can whisper it like any other character, and replies are delivered
@@ -84,7 +97,7 @@ Heimdall.ArchiveRetentionDays = 180
 
 # OPTIONAL EXTRA, OFF BY DEFAULT. Post every GM command attempt to an admin-only Discord channel,
 # for accountability. Covers commands typed in game and anything run through the console, which
-# includes the companion bot's own SOAP commands.
+# includes the commands the module runs on the companion bot's behalf.
 # This has nothing to do with tickets and many servers already log commands their own way. Left
 # at 0 the hook is never registered, no Discord channel is created, and no rows are written.
 Heimdall.CommandAuditEnabled = 0

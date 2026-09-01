@@ -1,6 +1,6 @@
 {
   "name": "heimdall-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": false,
   "type": "module",
   "description": "Discord ticket system for AzerothCore. Companion bot for the mod-heimdall server module.",
@@ -12,7 +12,7 @@
     "start": "node src/index.js",
     "test": "node --test",
     "diagnose": "node src/diagnose.js",
-    "check": "node --check src/index.js && node --check src/discord.js && node --check src/repository.js"
+    "check": "node --check src/index.js && node --check src/discord.js && node --check src/repository.js && node --check src/domain.js && node --check src/config.js"
   },
   "dependencies": {
     "discord.js": "^14.27.0",

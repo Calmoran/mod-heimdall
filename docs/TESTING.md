@@ -6,7 +6,14 @@ Discord guild and development realm to verify the following:
 - Module config and SQL load; no query writes to `gm_ticket` occur.
 - Repeated polls and bot restarts do not create duplicate channels, events, or
   player messages.
-- A temporary SOAP failure is leased, retried, and eventually delivered once.
+- A temporary failure of a queued realm command is leased, retried, and
+  eventually delivered once — and one the realm keeps refusing warns in the
+  ticket channel on the third attempt and posts a dead letter when it is given up
+  on, whichever side performed it.
+- The full ticket lifecycle works with no game account configured for the bot:
+  claim, identity login, reply, close.
+- A queued intent row naming an action the module does not perform is refused,
+  and refused the same way whatever its other fields contain.
 - A player-offline reply remains queued and delivers in sequence after login.
 - Discord-native categories create unique `DIS-` channels and enforce one open
   ticket per Discord user.

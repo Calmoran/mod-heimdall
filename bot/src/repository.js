@@ -428,7 +428,11 @@ export class TicketRepository {
       const [rows] = await connection.execute(
         // Expired leases are picked back up: without this, a bot that dies mid-delivery strands
         // its jobs in 'leased' forever, because nothing else ever revisits that state.
-        "SELECT * FROM heimdall_delivery WHERE direction IN ('to_discord', 'soap') AND available_at <= CURRENT_TIMESTAMP"
+        //
+        // Only Discord-bound work. A row bound for the realm is the worldserver's: the module
+        // leases it and performs it there, and leasing it here too would mean two sides running
+        // one command.
+        "SELECT * FROM heimdall_delivery WHERE direction = 'to_discord' AND available_at <= CURRENT_TIMESTAMP"
         + " AND (state = 'queued' OR (state = 'leased' AND leased_until < CURRENT_TIMESTAMP))"
         + ' ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED',
         [limit],

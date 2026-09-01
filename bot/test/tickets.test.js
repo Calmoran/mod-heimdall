@@ -1133,7 +1133,7 @@ test('the identity toggle acts on re-read state, not the label it was rendered f
     staff: async () => ({ gm_name: 'Helpbot' }),
     getSetting: async () => 'offline', // what is true NOW
   }
-  service.setIdentityHeld = async (name, held) => { calls.push(held) }
+  service.setIdentityHeld = async (realmTag, ticketId, name, held) => { calls.push(held) }
   service.refreshTicketHeader = async () => {}
 
   const TOGGLE_TICKET = { id: 7, public_key: 'R1-7', source: 'ingame', realm_tag: 'R1', claimant_discord_user_id: '100', claimant_gm_name: 'Helpbot' }
@@ -1473,4 +1473,126 @@ test('a job with no ticket falls back to the queue board', async () => {
   assert.equal(sent.length, 1)
   assert.match(sent[0], /^\[board\]/)
   assert.match(sent[0], /background job/)
+})
+
+// --- 1.1.0: the bot no longer holds a SOAP account ------------------------------------------
+//
+// The property these guard is the one the security claim rests on: what the bot puts in the queue
+// is an action and its arguments, never a command string, so a compromised bot cannot express a
+// command Heimdall does not perform. Asserting that in a README is worth nothing; these fail if it
+// stops being true.
+
+function commandChannelService({ inModule = true } = {}) {
+  const service = Object.create(HeimdallService.prototype)
+  const seen = { enqueued: [], audited: [], warned: [] }
+  service.logger = { info() {}, warn: (message, meta) => seen.warned.push({ message, meta }), error() {} }
+  service.repository = {
+    enqueue: async (job) => { seen.enqueued.push(job); return 'key' },
+    audit: async (...args) => { seen.audited.push(args) },
+    getSetting: async (key) => (inModule && key.startsWith('runtime.command_channel.') ? '1.1.0' : null),
+  }
+  service.soap = {
+    command: async () => assert.fail('the module owns this realm: nothing may go over SOAP'),
+    commandExpectingEffect: async () => assert.fail('the module owns this realm: nothing may go over SOAP'),
+  }
+  return { service, seen }
+}
+
+test('a GM action becomes an intent row carrying fields, not a command', async () => {
+  const { service, seen } = commandChannelService()
+  const ticket = { id: 7, public_key: 'R1-7', source: 'ingame', realm_tag: 'R1', player_name: 'Bob', claimant_discord_user_id: '100' }
+  service.requireRosteredStaff = async () => ({ gm_name: 'Helpbot' })
+  service.requireTicketOwner = () => {}
+  service.staffThreadFor = async () => ({ send: async () => {} })
+
+  const interaction = {
+    user: { id: '100' },
+    deferReply: async () => {},
+    editReply: async () => {},
+  }
+  await service.runGmAction(interaction, ticket, 'revive')
+
+  const job = seen.enqueued.find((row) => row.kind === 'gm_action')
+  assert.ok(job, 'the GM action never reached the queue')
+  assert.equal(job.direction, 'soap')
+  assert.equal(job.payload.action, 'revive')
+  assert.equal(job.payload.playerName, 'Bob')
+  assert.equal(job.payload.causedBy, '100', 'the Discord user who pressed the button was not recorded')
+  assert.equal(job.payload.realmTag, 'R1')
+
+  // The whole design in one assertion: no field of this row is a command.
+  for (const [field, value] of Object.entries(job.payload)) {
+    assert.ok(!String(value ?? '').includes('.revive'), `payload.${field} carries a command string`)
+    assert.ok(!String(value ?? '').startsWith('.'), `payload.${field} looks like a command`)
+  }
+})
+
+test('a payload that tries to carry a command is inert', async () => {
+  // The module composes commands from a fixed switch on `action`, so the worst a poisoned row can
+  // do is name an action that does not exist. This is the bot half of that: the fields it writes
+  // are the ones the module reads, and none of them is passed through as command text.
+  const { service, seen } = commandChannelService()
+  await service.queueGameCommand({
+    ticketId: 7,
+    realmTag: 'R1',
+    kind: 'gm_action',
+    payload: { action: '.ban Bob', playerName: 'Bob; .account set gmlevel Bob 3 -1' },
+    causedBy: '100',
+    uniqueParts: ['x'],
+  })
+
+  const job = seen.enqueued[0]
+  // The row is written as asked - the bot does not sanitise it, and must not be trusted to.
+  // What makes it inert is that ".ban Bob" is not an action the module's switch knows, and the
+  // player name fails the module's letters-only check. Both are asserted against the module's
+  // rules in the C++ side; here we pin the shape the module relies on.
+  assert.equal(job.kind, 'gm_action')
+  assert.equal(job.payload.action, '.ban Bob')
+  assert.ok(!Object.keys(job.payload).includes('command'), 'the queue must have no command field at all')
+})
+
+test('a realm command the module gave up on still reaches Discord as a dead letter', async () => {
+  // The module fails a job with the same attempt count and the same rule for "dead" the bot uses,
+  // then queues this so the announcement is made where announcements are made. What is verified
+  // here is that the module's row reaches the SAME renderer - so the warning and the dead letter
+  // say what they have always said.
+  const service = Object.create(HeimdallService.prototype)
+  const announced = []
+  service.announceDeliveryTrouble = async (job, error, outcome) => announced.push({ job, error, outcome })
+
+  await service.announceModuleTrouble({
+    ticket_id: 7,
+    payload: { ofKind: 'close_ticket', state: 'dead', attempts: 12, error: 'Ticket not found.', realmTag: 'R1' },
+  })
+
+  assert.equal(announced.length, 1, 'the module-side failure was never announced')
+  assert.equal(announced[0].job.kind, 'close_ticket', 'the dead letter would not say which action failed')
+  assert.equal(announced[0].job.ticket_id, 7)
+  assert.equal(announced[0].outcome.state, 'dead')
+  assert.equal(announced[0].outcome.attempts, 12, 'the attempt count must be the realm\'s, not a guess')
+  assert.match(String(announced[0].error.message), /Ticket not found/)
+})
+
+test('the third failure of a module-side job warns, and earlier ones stay quiet', async () => {
+  // Same thresholds as a bot-side failure, because it is the same function deciding.
+  const service = Object.create(HeimdallService.prototype)
+  const sent = []
+  service.deliveryAudience = async () => ({ channel: { send: async (payload) => sent.push(payload.content) }, key: 'R1-7' })
+
+  for (const attempts of [1, 2, 3]) {
+    await service.announceModuleTrouble({
+      ticket_id: 7,
+      payload: { ofKind: 'assign_ticket', state: 'queued', attempts, error: 'Invalid name specified' },
+    })
+  }
+  assert.equal(sent.length, 1, 'the warning fired on the wrong attempt')
+  assert.match(sent[0], /still trying to assign this ticket/)
+
+  await service.announceModuleTrouble({
+    ticket_id: 7,
+    payload: { ofKind: 'assign_ticket', state: 'dead', attempts: 12, error: 'Invalid name specified' },
+  })
+  assert.equal(sent.length, 2)
+  assert.match(sent[1], /given up trying to assign this ticket/)
+  assert.match(sent[1], /after 12 attempts/)
 })

@@ -1,6 +1,7 @@
 #include "AsyncCallbackProcessor.h"
 #include "CharacterCache.h"
 #include "Chat.h"
+#include "ChatCommand.h"
 #include "CommandScript.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
@@ -49,6 +50,53 @@ std::string Escape(std::string value)
     CharacterDatabase.EscapeString(value);
     return value;
 }
+
+namespace
+{
+// A console handler that keeps what the command printed instead of writing it to a terminal.
+// The core replies to a refused command by printing the reason - "Ticket not found.", a syntax
+// line - so this text is the only account of what happened, and it is what the delivery row and
+// the Discord dead-letter end up quoting.
+class CapturingCliHandler final : public CliHandler
+{
+public:
+    CapturingCliHandler() : CliHandler(this, &CapturingCliHandler::Collect) { }
+
+    [[nodiscard]] std::string const& Output() const { return _output; }
+
+private:
+    static void Collect(void* self, std::string_view text)
+    {
+        static_cast<CapturingCliHandler*>(self)->_output.append(text);
+    }
+
+    std::string _output;
+};
+}
+
+// Deliberately the console path and not a private shortcut: the core's own parser resolves the
+// command, the core's own handler performs it, and every rule it enforces still applies. The
+// module gains nothing here that SOAP did not already have - it loses the network hop, the open
+// port, and the administrator account SOAP requires (ACSoap.cpp refuses anything below
+// SEC_ADMINISTRATOR before it even looks at the command).
+//
+// The safety of this rests entirely on the caller: `command` is composed by PollGameCommands from
+// a fixed set of actions, never from a string the bot supplied. That property is what makes a
+// compromised bot unable to express ".ban" - not this function.
+bool RunRealmCommand(std::string const& command, std::string& output)
+{
+    CapturingCliHandler handler;
+    bool parsed = handler.ParseCommands(command);
+
+    output = handler.Output();
+    // Trim the trailing newlines CliHandler::SendSysMessage appends after every line.
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+        output.pop_back();
+
+    // ParseCommands answers "was this text a command at all", which stays true for a command that
+    // refused its arguments; the handler's error flag is what separates the two.
+    return parsed && !handler.HasSentErrorMessage();
+}
 }
 
 namespace
@@ -95,7 +143,8 @@ Settings ReadSettings()
     Settings settings;
     settings.enabled = sConfigMgr->GetOption<bool>("Heimdall.Enabled", false);
     settings.ticketPollSeconds = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.TicketPollSeconds", 15));
-    settings.deliveryPollSeconds = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.DeliveryPollSeconds", 5));
+    settings.deliveryPollSeconds = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.DeliveryPollSeconds", 1));
+    settings.deliveryMaxAttempts = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.DeliveryMaxAttempts", 12), 1, 100);
     settings.maxWhisperBytes = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.MaxWhisperBytes", 240), 32, 255);
     settings.archiveRetentionDays = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.ArchiveRetentionDays", 180));
     settings.realmPrefix = sConfigMgr->GetOption<std::string>("Heimdall.RealmPrefix", "");
@@ -674,6 +723,7 @@ public:
 
         SeedSeenTickets();
         IdentityRegistry::instance()->Configure(_settings.gmIdentities, _settings.realmTag);
+        PublishCommandChannel();
 
         if (firstRun)
         {
@@ -774,6 +824,7 @@ public:
 
         IdentityRegistry::instance()->Update();
         PollDeliveries(diff);
+        PollGameCommands(diff);
         UpdateCommandAudit(diff);
         SweepPlayerContext(diff);
 
@@ -1108,6 +1159,295 @@ private:
         } while (rows->NextRow());
     }
 
+    // Commands the bot wants performed on the realm. The bot no longer holds a SOAP account: it
+    // writes an intent row - an action and its arguments as separate fields - and this leases the
+    // row and performs it here, inside the world thread.
+    //
+    // The bot's row never contains a command string. Every command below is composed from a fixed
+    // switch on an action name this function recognises, with the arguments validated first, so a
+    // payload carrying ".ban Someone" is not a command - it is an unknown action, and it is
+    // refused. That is the point of the design: the boundary is structural, not a promise.
+    void PollGameCommands(uint32 diff)
+    {
+        _gameCommandElapsed += diff;
+        if (_gameCommandElapsed < _settings.deliveryPollSeconds * IN_MILLISECONDS)
+            return;
+        _gameCommandElapsed = 0;
+
+        std::string escapedRealmTag = Escape(_settings.realmTag);
+
+        // Recover rows a previous run of this worldserver left stranded in 'leased'.
+        CharacterDatabase.Execute(
+            "UPDATE heimdall_delivery SET state = 'queued', lease_owner = NULL, leased_until = NULL "
+            "WHERE direction = 'soap' AND state = 'leased' AND leased_until < CURRENT_TIMESTAMP "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.realmTag')) = '{}'",
+            escapedRealmTag);
+
+        QueryResult rows = CharacterDatabase.Query(
+            "SELECT d.id, d.kind, d.attempts, COALESCE(d.ticket_id, 0), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.action')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.sourceTicketId')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.gmName')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.playerName')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.destination')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.publicKey')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.causedBy')) "
+            "FROM heimdall_delivery d "
+            "WHERE d.direction = 'soap' AND d.state = 'queued' AND d.available_at <= CURRENT_TIMESTAMP "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.realmTag')) = '{}' "
+            "ORDER BY d.id LIMIT 20",
+            escapedRealmTag);
+        if (!rows)
+            return;
+
+        do
+        {
+            Field* fields = rows->Fetch();
+            uint64 deliveryId = fields[0].Get<uint64>();
+            std::string kind = fields[1].Get<std::string>();
+            // The lease below adds one. Everything downstream uses that post-lease number, because
+            // reading it back would race the lease: CharacterDatabase.Execute is asynchronous, so a
+            // Query issued straight after it can still see the row as it was. Getting this wrong
+            // put attempts = 0 into a dead letter that had really tried twelve times.
+            uint32 attemptsAfter = fields[2].Get<uint32>() + 1;
+            uint64 ticketId = fields[3].Get<uint64>();
+            std::string action = fields[4].Get<std::string>();
+            std::string sourceTicketId = fields[5].Get<std::string>();
+            std::string gmName = fields[6].Get<std::string>();
+            std::string playerName = fields[7].Get<std::string>();
+            std::string destination = fields[8].Get<std::string>();
+            std::string publicKey = fields[9].Get<std::string>();
+            std::string causedBy = fields[10].Get<std::string>();
+
+            // Lease before performing, so a crash mid-command leaves a recoverable row rather than
+            // a command whose fate nobody knows.
+            CharacterDatabase.Execute(
+                "UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, "
+                "lease_owner = '{}', leased_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL {} SECOND) "
+                "WHERE id = {} AND state = 'queued'",
+                Escape(LeaseOwner()), DELIVERY_LEASE_SECONDS, deliveryId);
+
+            std::string command;
+            std::string refusal;
+            if (!ComposeGameCommand(kind, action, sourceTicketId, gmName, playerName, destination, publicKey, command, refusal))
+            {
+                FailGameCommand(deliveryId, kind, ticketId, attemptsAfter, refusal);
+                continue;
+            }
+
+            std::string output;
+            bool succeeded = RunRealmCommand(command, output);
+
+            // A handler that returns true having done nothing is the trap the bot learned the hard
+            // way: ".ticket close" on an unknown id answers "Ticket not found." and reports
+            // success. The reply text is screened for the markers the bot screened SOAP replies for.
+            if (succeeded && LooksLikeRefusal(output))
+                succeeded = false;
+
+            if (!succeeded)
+            {
+                FailGameCommand(deliveryId, kind, ticketId, attemptsAfter,
+                    output.empty() ? ("The realm refused \"" + command + "\".") : output);
+                continue;
+            }
+
+            CharacterDatabase.Execute(
+                "UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
+                "leased_until = NULL, last_error = NULL WHERE id = {}",
+                deliveryId);
+
+            AttributeGameCommand(command, causedBy);
+            LOG_INFO(LOG_FILTER, "Ran \"{}\" for delivery {}.", command, deliveryId);
+        } while (rows->NextRow());
+    }
+
+    // Builds the command text. Every argument is validated here, and an action this does not know
+    // is refused rather than passed on.
+    static bool ComposeGameCommand(std::string const& kind, std::string const& action,
+        std::string const& sourceTicketId, std::string const& gmName, std::string const& playerName,
+        std::string const& destination, std::string const& publicKey, std::string& command, std::string& refusal)
+    {
+        std::ostringstream out;
+
+        if (kind == "assign_ticket")
+        {
+            if (!IsTicketNumber(sourceTicketId) || !IsCharacterName(gmName))
+                return Refuse(refusal, "assign_ticket needs an in-game ticket number and a character name.");
+            out << ".ticket assign " << sourceTicketId << ' ' << gmName;
+        }
+        else if (kind == "close_ticket")
+        {
+            if (!IsTicketNumber(sourceTicketId))
+                return Refuse(refusal, "close_ticket needs an in-game ticket number.");
+            // ".ticket close", never ".ticket complete": complete sets only `completed` and leaves
+            // `type` at TICKET_TYPE_OPEN, which permanently blocks the player from opening another.
+            out << ".ticket close " << sourceTicketId;
+        }
+        else if (kind == "identity_login" || kind == "identity_logout")
+        {
+            if (!IsCharacterName(gmName))
+                return Refuse(refusal, "an identity command needs a character name.");
+            out << ".heimdall identity " << (kind == "identity_login" ? "login " : "logout ") << gmName;
+        }
+        else if (kind == "gm_action")
+        {
+            if (!IsCharacterName(playerName))
+                return Refuse(refusal, "a GM action needs a character name.");
+
+            if (action == "revive")
+                out << ".revive " << playerName;
+            else if (action == "unstuck")
+                out << ".unstuck " << playerName << " inn";
+            else if (action == "combatstop")
+                out << ".combatstop " << playerName;
+            else if (action == "kick")
+            {
+                if (!IsPublicKey(publicKey))
+                    return Refuse(refusal, "kick needs the ticket's key for its reason.");
+                // One token, not two: cs_misc.cpp declares the reason Optional<std::string_view>,
+                // and the parser refuses a command with anything left over.
+                out << ".kick " << playerName << " Ticket-" << publicKey;
+            }
+            else if (action == "teleport")
+            {
+                if (!IsTeleDestination(destination))
+                    return Refuse(refusal, "teleport needs one destination from the realm's teleport list.");
+                out << ".tele name " << playerName << ' ' << destination;
+            }
+            else
+                return Refuse(refusal, "\"" + action + "\" is not a GM action Heimdall performs.");
+        }
+        else
+            return Refuse(refusal, "\"" + kind + "\" is not a command Heimdall performs.");
+
+        command = out.str();
+        return true;
+    }
+
+    static bool Refuse(std::string& refusal, std::string reason)
+    {
+        refusal = std::move(reason);
+        return false;
+    }
+
+    // Digits only, and short enough that no composed command can be made unwieldy.
+    static bool IsTicketNumber(std::string const& value)
+    {
+        return !value.empty() && value.size() <= 10
+            && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+    }
+
+    // A WoW character name: letters only, twelve at most - the client's own limit. This is what
+    // stops a name argument carrying a space and becoming a second command argument.
+    static bool IsCharacterName(std::string const& value)
+    {
+        return !value.empty() && value.size() <= 12
+            && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isalpha(c) != 0; });
+    }
+
+    static bool IsPublicKey(std::string const& value)
+    {
+        return !value.empty() && value.size() <= 32
+            && std::all_of(value.begin(), value.end(), [](unsigned char c)
+            {
+                return std::isalnum(c) != 0 || c == '-' || c == '_';
+            });
+    }
+
+    static bool IsTeleDestination(std::string const& value)
+    {
+        if (value == "$home")
+            return true;
+
+        return !value.empty() && value.size() <= 48
+            && std::all_of(value.begin(), value.end(), [](unsigned char c)
+            {
+                return std::isalnum(c) != 0 || c == '_' || c == '-';
+            });
+    }
+
+    // The markers the bot screened SOAP replies with, kept because the reply text is the same
+    // text - it is the core's, not the transport's.
+    static bool LooksLikeRefusal(std::string const& output)
+    {
+        std::string lowered = output;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        for (char const* marker : { "not found", "does not exist", "invalid name specified",
+            "cannot be assigned", "already assigned", "no such", "syntax:", "incorrect syntax" })
+        {
+            if (lowered.find(marker) != std::string::npos)
+                return true;
+        }
+        return false;
+    }
+
+    // Fails a job the way the bot fails one: the same attempt count, the same backoff, the same
+    // rule for when it is dead. Then it queues the announcement, because the ticket channel is the
+    // bot's to write in - and the bot decides whether a failure is worth speaking about, so that
+    // decision has one definition and not two that can drift.
+    //
+    // Every value here is computed rather than read back. CharacterDatabase.Execute is asynchronous:
+    // a Query issued after it can still see the row as it was, and an earlier draft of this shipped
+    // "attempts: 0" in a dead letter for a job that had tried twelve times.
+    void FailGameCommand(uint64 deliveryId, std::string const& kind, uint64 ticketId, uint32 attempts,
+        std::string const& reason)
+    {
+        bool dead = attempts >= _settings.deliveryMaxAttempts;
+
+        CharacterDatabase.Execute(
+            "UPDATE heimdall_delivery SET state = '{}', "
+            "available_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL LEAST(900, POW(2, {}) * 5) SECOND), "
+            "leased_until = NULL, last_error = LEFT('{}', 512) WHERE id = {}",
+            dead ? "dead" : "queued", attempts, Escape(reason), deliveryId);
+
+        LOG_WARN(LOG_FILTER, "Delivery {} ({}) failed on attempt {}{}: {}", deliveryId, kind, attempts,
+            dead ? " and was given up on" : "", reason);
+
+        std::ostringstream rawKey;
+        rawKey << "trouble:" << _settings.realmTag << ':' << deliveryId << ':' << attempts;
+
+        CharacterDatabase.Execute(
+            "INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
+            "VALUES ({}, SHA2('{}', 256), 'to_discord', 'delivery_trouble', "
+            "JSON_OBJECT('realmTag', '{}', 'ofKind', '{}', 'state', '{}', 'attempts', {}, 'error', '{}'))",
+            ticketId ? std::to_string(ticketId) : std::string("NULL"), Escape(rawKey.str()),
+            Escape(_settings.realmTag), Escape(kind), dead ? "dead" : "queued", attempts, Escape(reason));
+    }
+
+    // The realm logs every command this module runs as "Console", exactly as it logged the bot's
+    // SOAP commands - a CliHandler has no session to attribute. This posts the half the realm
+    // cannot know: which Discord user asked for it.
+    void AttributeGameCommand(std::string const& command, std::string const& causedBy)
+    {
+        if (!_settings.commandAuditEnabled)
+            return;
+
+        std::ostringstream rawKey;
+        rawKey << "attrib:" << _settings.realmTag << ':' << GameTime::GetGameTime().count() << ':' << command << ':' << causedBy;
+
+        CharacterDatabase.Execute(
+            "INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
+            "VALUES (NULL, SHA2('{}', 256), 'to_discord', 'command_attribution', "
+            "JSON_OBJECT('realmTag', '{}', 'command', '{}', 'causedBy', {}))",
+            Escape(rawKey.str()), Escape(_settings.realmTag), Escape(command),
+            causedBy.empty() ? std::string("NULL") : ("'" + Escape(causedBy) + "'"));
+    }
+
+    // Tells the bot that this realm's commands are performed by the module, so it does not need a
+    // SOAP account. The bot reads this at startup: absent means an older worldserver that cannot
+    // lease intent rows, and the bot falls back to SOAP for one release rather than queueing
+    // commands nothing will ever pick up. A binary is what carries this - an operator who updates
+    // the bot but has not yet rebuilt the worldserver is the case it exists for.
+    void PublishCommandChannel() const
+    {
+        CharacterDatabase.Execute(
+            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Escape("runtime.command_channel." + _settings.realmTag), Escape(std::string(HEIMDALL_VERSION)));
+    }
+
     [[nodiscard]] std::string LeaseOwner() const
     {
         return "worldserver:" + _settings.realmTag;
@@ -1140,6 +1480,7 @@ private:
     Settings& _settings = CurrentSettings();
     uint32 _ticketElapsed = 0;
     uint32 _deliveryElapsed = 0;
+    uint32 _gameCommandElapsed = 0;
     uint32 _contextElapsed = 0;
     uint32 _watermark = 0;
     std::unordered_map<uint32, TicketState> _seen;

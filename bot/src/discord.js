@@ -50,6 +50,9 @@ const DELIVERY_EARLY_WARNING_ATTEMPTS = 3
 const DELIVERY_ACTIONS = {
   assign_ticket: 'assign this ticket to its claimant in game',
   close_ticket: 'close this ticket in game',
+  identity_login: 'bring the GM identity into the world',
+  identity_logout: 'take the GM identity out of the world',
+  gm_action: 'carry out a GM action on the player',
   virtual_whisper: 'deliver a staff reply to the player in game',
   player_whisper: 'post a player message into Discord',
   sync_ingame_ticket: 'update this ticket from the realm',
@@ -131,12 +134,11 @@ function actorRoles(interaction) {
 }
 
 export class HeimdallService {
-  constructor({ client, repository, archive, config, soap, logger = console }) {
+  constructor({ client, repository, archive, config, logger = console }) {
     this.client = client
     this.repository = repository
     this.archive = archive
     this.config = config
-    this.soap = soap
     this.logger = logger
   }
 
@@ -1458,7 +1460,7 @@ export class HeimdallService {
       const held = action === 'identity-toggle'
         ? (await this.identityState(ticket.realm_tag, gmName)) !== 'held'
         : action === 'identity-login'
-      await this.setIdentityHeld(gmName, held, interaction.user.id)
+      await this.setIdentityHeld(ticket.realm_tag, ticket.id, gmName, held, interaction.user.id)
       await this.refreshTicketHeader(interaction.channel, ticket)
 
       return interaction.reply({
@@ -1494,14 +1496,6 @@ export class HeimdallService {
     if (ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only the assigned staff member or an administrator can act on this player.')
   }
 
-  // Also applied to a reply that arrived with HTTP 200. A refusal normally comes back as a SOAP
-  // fault, but several handlers answer "Ticket not found." and similar with a successful status,
-  // so the reply text is screened as well. The help text a handler triggers by refusing its
-  // arguments is matched in both the spellings the core produces.
-  gmActionFailureMarkers() {
-    return [/not found/i, /does not exist/i, /^\s*Syntax:/im, /incorrect syntax/i, /no such/i]
-  }
-
   async runGmAction(interaction, ticket, key, context = {}) {
     const action = GM_ACTIONS[key]
     if (!action) throw new Error('Unknown action.')
@@ -1512,22 +1506,26 @@ export class HeimdallService {
     // Same validation .ticket assign puts a GM name through, for the same reason: this string
     // becomes part of a command.
     const name = validateGmName(ticket.player_name ?? '')
-    const command = action.command(name, { ...context, publicKey: ticket.public_key })
     await interaction.deferReply({ flags: MessageFlags.Ephemeral })
 
-    let reply
-    try {
-      reply = await this.soap.commandExpectingEffect(command, this.gmActionFailureMarkers())
-      if (action.expectSilence && reply.trim()) throw new Error(`Core rejected "${command}": ${reply.replace(/\s+/g, ' ').slice(0, 200)}`)
-    } catch (error) {
-      this.logger.warn('GM action refused', { ticket: ticket.public_key, action: key, by: interaction.user.id, error: String(error.message ?? error) })
-      await this.repository.audit(ticket.id, 'gm_action_failed', interaction.user.id, { action: key, command, error: String(error.message ?? error) })
-      throw new Error(this.explainGmActionFailure(action, name, error))
-    }
+    // The realm-side half: an intent row the module performs. The module composes the command
+    // itself, so nothing here becomes command text.
+    await this.queueGameCommand({
+      ticketId: ticket.id,
+      realmTag: ticket.realm_tag,
+      kind: 'gm_action',
+      payload: {
+        action: key,
+        playerName: name,
+        destination: context.destination ?? null,
+        publicKey: ticket.public_key,
+      },
+      causedBy: interaction.user.id,
+      uniqueParts: [key, name, context.destination ?? '', Date.now()],
+    })
 
-    this.logger.info('GM action ran', { ticket: ticket.public_key, action: key, by: interaction.user.id, target: name })
-    await this.repository.audit(ticket.id, 'gm_action', interaction.user.id, { action: key, command, ...context })
-    await this.attributeSoapCommand(command, interaction.user.id)
+    this.logger.info('GM action queued', { ticket: ticket.public_key, action: key, by: interaction.user.id, target: name })
+    await this.repository.audit(ticket.id, 'gm_action', interaction.user.id, { action: key, ...context })
 
     // Into the staff thread, so the rest of the team sees what was done rather than only the
     // person who clicked.
@@ -1535,22 +1533,6 @@ export class HeimdallService {
     const thread = await this.staffThreadFor(interaction, ticket)
     await thread.send({ content: `${message} (<@${interaction.user.id}>)`, allowedMentions: { users: [interaction.user.id], roles: [], repliedUser: false } })
     return interaction.editReply({ content: message, allowedMentions: ALLOWED_MENTIONS })
-  }
-
-  // The core's reason for refusing arrives in the SOAP fault, and it is written for someone
-  // reading a server console. These are the four that staff actually hit.
-  explainGmActionFailure(action, name, error) {
-    const detail = String(error.message ?? error).replace(/^SOAP command refused: /, '')
-    if (/does not exist/i.test(detail) && detail.toLowerCase().includes(name.toLowerCase())) {
-      return `The realm has no character called **${name}**. The ticket may name a character that has since been deleted or renamed.`
-    }
-    if (action.needsDestination && /teleport location|Either:|Expected/i.test(detail)) {
-      return 'The realm has no teleport destination by that name. Use one from its teleport list, or $home for the player’s hearthstone.'
-    }
-    if (action.requiresOnline && /not found|Syntax|does not exist/i.test(detail)) {
-      return `**${name}** does not appear to be online. ${action.label} needs them logged in.`
-    }
-    return `The realm refused that: ${detail.slice(0, 300)}`
   }
 
   async handleSelect(interaction) {
@@ -1646,7 +1628,21 @@ export class HeimdallService {
   async claim(interaction, ticket) {
     const staff = await this.requireRosteredStaff(interaction)
     const claimed = await this.repository.claim({ ticketId: ticket.id, discordUserId: interaction.user.id, gmName: staff.gm_name })
-    if (claimed.source === 'ingame') await this.repository.enqueue({ ticketId: claimed.id, direction: 'soap', kind: 'assign_ticket', payload: { sourceTicketId: claimed.source_ticket_id, gmName: staff.gm_name, causedBy: interaction.user.id }, uniqueParts: ['assign', claimed.version] })
+    if (claimed.source === 'ingame') {
+      // Canonicalised here, as the row is written, because the row is what the realm acts on and
+      // the module composes the command from it. A roster entry stored as somebody typed it -
+      // "heimdalltest" for a character called "Heimdalltest" - is corrected now and repaired in
+      // place, so an install converges as it is used rather than needing a migration.
+      const gmName = validateGmName(await this.canonicalGmNameForCommand(staff.gm_name))
+      await this.queueGameCommand({
+        ticketId: claimed.id,
+        realmTag: claimed.realm_tag,
+        kind: 'assign_ticket',
+        payload: { sourceTicketId: claimed.source_ticket_id, gmName },
+        causedBy: interaction.user.id,
+        uniqueParts: ['assign', claimed.version],
+      })
+    }
     await this.refreshVisibility(this.ticketChannelFrom(interaction), claimed)
     await interaction.reply({ content: `Claimed as **${staff.gm_name}**. Other staff can no longer see this channel.`, flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS })
   }
@@ -1655,7 +1651,7 @@ export class HeimdallService {
     const staff = await this.requireRosteredStaff(interaction)
     if (ticket.source !== 'ingame' || ticket.claimant_discord_user_id !== interaction.user.id || ticket.claimant_gm_name !== staff.gm_name) throw new Error('Only the currently assigned staff member can reply to this player.')
 
-    // Discord closes an interaction after three seconds. A SOAP call that fails slowly used to blow
+    // Discord closes an interaction after three seconds. A realm call that failed slowly used to blow
     // that window, so the GM saw nothing at all at the exact moment something had gone wrong - the
     // log showed the real error followed by "Unknown interaction". Deferring first means the reason
     // always reaches them, however long the realm takes to refuse.
@@ -1663,7 +1659,7 @@ export class HeimdallService {
 
     // A forgotten logout should not be a dead end: bring the identity back rather than refusing.
     const wasOffline = (await this.identityState(ticket.realm_tag, staff.gm_name)) !== 'held'
-    if (wasOffline) await this.setIdentityHeld(staff.gm_name, true, interaction.user.id)
+    if (wasOffline) await this.setIdentityHeld(ticket.realm_tag, ticket.id, staff.gm_name, true, interaction.user.id)
 
     const chunks = splitWowMessage(body)
     for (const [index, text] of chunks.entries()) {
@@ -1698,7 +1694,7 @@ export class HeimdallService {
   }
 
   // The game module publishes "held" or "offline" per identity into the settings table, and is
-  // driven through the same SOAP channel already used for ticket assignment and closure.
+  // driven by the same queued intent rows as ticket assignment and closure.
 
   identityStateKey(realmTag, gmName) {
     return `identity.state.${realmTag}.${gmName}`
@@ -1708,16 +1704,36 @@ export class HeimdallService {
     return (await this.repository.getSetting(this.identityStateKey(realmTag, gmName))) ?? 'offline'
   }
 
-  async setIdentityHeld(gmName, held, causedBy = null) {
-    const command = `.heimdall identity ${held ? 'login' : 'logout'} ${validateGmName(gmName)}`
-    await this.soap.command(command)
-    await this.attributeSoapCommand(command, causedBy)
+  async setIdentityHeld(realmTag, ticketId, gmName, held, causedBy = null) {
+    await this.queueGameCommand({
+      ticketId,
+      realmTag,
+      kind: held ? 'identity_login' : 'identity_logout',
+      payload: { gmName: validateGmName(gmName) },
+      causedBy,
+      uniqueParts: [gmName, held ? 'in' : 'out', Date.now()],
+    })
   }
 
-  // AzerothCore cannot tell a SOAP command from one typed at the local terminal - SOAP queues a
-  // CliCommandHolder down the same path - so the module's audit log records every bot-issued
-  // command as "Console". This posts the missing half: what the bot ran and which Discord user
-  // caused it, so an admin can correlate the two entries by timestamp.
+  // One row, one action, arguments as fields. Deliberately not a command string: the module
+  // composes the command from a fixed set of actions, so a row cannot express one that Heimdall
+  // does not perform. This is the bot's only way to affect the realm.
+  //
+  // The `realm_command` direction is the module's to lease; the bot's own lease query skips it.
+  async queueGameCommand({ ticketId, realmTag, kind, payload, causedBy, uniqueParts }) {
+    return this.repository.enqueue({
+      ticketId,
+      direction: 'soap',
+      kind,
+      payload: { ...payload, realmTag, causedBy: causedBy ?? null },
+      uniqueParts,
+    })
+  }
+
+  // A command the module runs is indistinguishable from one typed at the local terminal - both go
+  // through a console handler, which has no session to attribute - so the realm's own audit log
+  // records every one of them as "Console". This posts the missing half: what was run and which
+  // Discord user caused it, so an admin can correlate the two entries by timestamp.
   //
   // This used to pass create:false, on the reasoning that the audit log is opt-in and a server that
   // never enabled it should not acquire a channel. The effect was the opposite of opt-in: the
@@ -1730,18 +1746,21 @@ export class HeimdallService {
   // it now. The two are not equivalent in scope, and this half is the one that always applies: it
   // records what THIS BOT did to the realm, on behalf of a named Discord user, which is precisely
   // what an admin needs when the realm's own log attributes it all to "Console".
-  async attributeSoapCommand(command, causedBy) {
+  // Posts the half the realm cannot know. The realm logs every command the module runs as
+  // "Console" - a console handler has no session to attribute - so this names the Discord user who
+  // asked for it, and an admin can line the two up by timestamp.
+  async attributeRealmCommand(command, causedBy) {
     try {
       const channel = await this.auditChannel({ create: true })
       if (!channel) return
       const who = causedBy ? `<@${causedBy}>` : 'an automatic action'
       await channel.send({
-        content: `Bot ran \`${command}\` on behalf of ${who} — the realm logs this as **Console**.`,
+        content: `Ran \`${command}\` for ${who} — the realm logs this as **Console**.`,
         allowedMentions: ALLOWED_MENTIONS,
       })
     } catch (error) {
       // Attribution is a convenience. Never let it fail the command it describes.
-      this.logger.warn(`Could not post SOAP attribution for "${command}": ${error.message}`)
+      this.logger.warn(`Could not post command attribution for "${command}": ${error.message}`)
     }
   }
 
@@ -1768,13 +1787,20 @@ export class HeimdallService {
   }
 
   // The single close path. Auto-close uses this too, so an automatic closure is identical to a
-  // manual one - same database transition, same SOAP ".ticket close", same channel move and
+  // manual one - same database transition, same queued ".ticket close", same channel move and
   // deletion schedule - rather than a parallel implementation that can drift.
   async performClose({ ticket, actorId, note, idempotencyKey, channel, playerNotice }) {
     const closed = await this.repository.close(ticket.id, actorId, this.config.retentionDays)
     await this.repository.recordMessage({ ticketId: ticket.id, actorKind: 'staff', actorRef: actorId, body: note, idempotencyKey })
     if (closed.source === 'ingame') {
-      await this.repository.enqueue({ ticketId: closed.id, direction: 'soap', kind: 'close_ticket', payload: { sourceTicketId: closed.source_ticket_id, causedBy: actorId }, uniqueParts: ['close', idempotencyKey] })
+      await this.queueGameCommand({
+        ticketId: closed.id,
+        realmTag: closed.realm_tag,
+        kind: 'close_ticket',
+        payload: { sourceTicketId: closed.source_ticket_id },
+        causedBy: actorId,
+        uniqueParts: ['close', idempotencyKey],
+      })
     }
     await this.applyClosureToDiscord(closed, { channel, playerNotice })
     return closed
@@ -1782,7 +1808,7 @@ export class HeimdallService {
 
   // Everything that happens to Discord when a ticket ends, in one place, because there are two ways
   // a ticket can end and they must not drift apart. performClose owns the database transition and
-  // the SOAP command; a closure that started in game needs neither - the realm has already done
+  // the queued realm command; a closure that started in game needs neither - the realm has done
   // both - but needs exactly this half, and used to get none of it.
   //
   // Idempotent by construction: the delete_channel job is keyed, and reapplying the category and
@@ -2111,8 +2137,8 @@ ${chunk}\`\`\``,
     if (!channel) return
     const what = DELIVERY_ACTIONS[job.kind] ?? `carry out ${job.kind}`
     const subject = key ? `\`${key}\`` : 'A background job'
-    // SOAP answers carry a trailing carriage return, which reaches here as a literal &#xD; and
-    // reads as noise at the end of every quoted error.
+    // A realm answer can carry a trailing carriage return, which reaches here as a literal &#xD;
+    // and reads as noise at the end of every quoted error.
     const reason = sanitizeText(String(error?.message ?? error).replace(/&#xD;/g, '').trim()).slice(0, 300)
     // Counted, not asserted. An earlier draft said "about 80 minutes", which is only true at the
     // default twelve attempts - on an install that had lowered DELIVERY_MAX_ATTEMPTS the message
@@ -2133,6 +2159,19 @@ Last error: \`${reason}\``
     await channel.send({ content, allowedMentions: ALLOWED_MENTIONS })
   }
 
+  // A realm command the MODULE gave up on. The module applies the same attempt count, the same
+  // backoff and the same rule for when a job is dead, then queues this so the announcement is made
+  // where announcements are made. The decision of whether a failure is worth speaking about stays
+  // here, in announceDeliveryTrouble, so there is one definition of it rather than two.
+  async announceModuleTrouble(job) {
+    const payload = job.payload ?? {}
+    await this.announceDeliveryTrouble(
+      { kind: payload.ofKind, ticket_id: job.ticket_id, payload },
+      new Error(String(payload.error ?? 'The realm refused the command.')),
+      { state: payload.state, attempts: Number(payload.attempts) || 0 },
+    )
+  }
+
   async processDeliveries() {
     const jobs = await this.repository.leaseBotDeliveries(20, this.config.leaseSeconds)
     for (const job of jobs) {
@@ -2148,25 +2187,12 @@ Last error: \`${reason}\``
         else if (job.direction === 'to_discord' && job.kind === 'delete_channel') {
           const channel = await this.client.channels.fetch(job.payload.channelId).catch(() => null)
           if (channel) await channel.delete('Configured closed-ticket review window ended')
-        } else if (job.direction === 'soap' && job.kind === 'assign_ticket') {
-          // Installs that predate the fix above hold names as somebody typed them, in the roster and
-          // in every ticket claimed with one. Canonicalising here rather than only at staff-add is
-          // what makes those installs correct without a migration: they converge as they are used.
-          const gmName = validateGmName(await this.canonicalGmNameForCommand(job.payload.gmName))
-          if (!Number.isSafeInteger(Number(job.payload.sourceTicketId))) throw new Error('Invalid in-game ticket number.')
-          const assignCommand = `.ticket assign ${job.payload.sourceTicketId} ${gmName}`
-          await this.soap.commandExpectingEffect(assignCommand)
-          await this.attributeSoapCommand(assignCommand, job.payload.causedBy ?? null)
-        } else if (job.direction === 'soap' && job.kind === 'close_ticket') {
-          if (!Number.isSafeInteger(Number(job.payload.sourceTicketId))) throw new Error('Invalid in-game ticket number.')
-          // ".ticket close", not ".ticket complete". Complete sets only `completed`, leaving
-          // `type` at TICKET_TYPE_OPEN - and GetTicketByPlayer (which decides whether a player
-          // "already has an open ticket") tests only !IsClosed(), i.e. type. Completing therefore
-          // hides the ticket from .ticket list while permanently blocking that player from
-          // opening another one. Close sets type via SetClosedBy and frees them.
-          const closeCommand = `.ticket close ${job.payload.sourceTicketId}`
-          await this.soap.commandExpectingEffect(closeCommand)
-          await this.attributeSoapCommand(closeCommand, job.payload.causedBy ?? null)
+        }
+        else if (job.direction === 'to_discord' && job.kind === 'command_attribution') {
+          await this.attributeRealmCommand(job.payload.command, job.payload.causedBy ?? null)
+        }
+        else if (job.direction === 'to_discord' && job.kind === 'delivery_trouble') {
+          await this.announceModuleTrouble(job)
         }
         else throw new Error(`Unsupported delivery ${job.direction}/${job.kind}`)
         await this.repository.delivered(job.id)
@@ -2229,7 +2255,7 @@ Last error: \`${reason}\``
   }
 
   // validateGmName is a format check, so "Helpbat" for "Helpbot" was accepted here and surfaced
-  // much later as a SOAP refusal - to a GM, mid-conversation with a player. The module knows the
+  // much later as a refusal from the realm - to a GM, mid-conversation with a player. The module knows the
   // real list, because it resolves each configured name against the realm at startup and discards
   // the ones that are not usable characters; it publishes what survived. This moves the discovery
   // from mid-conversation to the moment the mistake is made.
@@ -2246,7 +2272,7 @@ Last error: \`${reason}\``
       return gmName
     }
     // Return the realm's spelling, not the operator's. Matching case-insensitively is friendly;
-    // storing what was typed is not, because every SOAP command is built from the stored form and
+    // storing what was typed is not, because every command is built from the stored form and
     // the core refuses a name whose casing does not match the character. That refusal surfaced as a
     // delivery retrying for 81 minutes and then dying, with nothing said to anyone.
     const canonical = names.find((name) => name.toLowerCase() === gmName.toLowerCase())

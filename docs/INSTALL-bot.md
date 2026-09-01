@@ -104,34 +104,35 @@ holding the `open-a-ticket` panel and the `ticket-queue` board, plus the Open, C
 ticket categories — appended to the end of your channel list, and remembers them. It prints the ids
 afterwards if you would rather pin them in `.env`.
 
-## 3. Enable SOAP and create the account the bot uses
+## 3. How the bot reaches your realm
 
-The bot makes every in-game change through AzerothCore's SOAP service, so it needs that service
-switched on and an account to authenticate with. Neither is created for you.
+It does not, directly - and that is the design, so it is worth thirty seconds before you install.
 
-In `worldserver.conf`:
+The bot cannot send your realm a command. When a staff member claims a ticket, closes one, or uses
+a GM action, the bot writes a row to its own database naming **an action and its arguments as
+separate fields**. The module, inside your worldserver, picks that row up and performs the action
+through the core's own command handlers. The command text is composed in the module, from a fixed
+list of actions, and nothing the bot writes is ever executed as a command.
 
+So there is no game account to create for the bot, no remote command service to enable, and no
+credential to guard. What a compromised bot could do is queue "close ticket 7". It cannot express
+`.ban`, because no field it writes could carry one - the module would see an action it does not
+have, and refuse it.
+
+The bot's only access to your realm is the MySQL account you create in the next step: per-table
+grants on seven `heimdall_*` tables, no DDL, loopback only.
+
+### Checking that for yourself
+
+Worth a minute, because a claim you can falsify beats a paragraph:
+
+```sql
+SELECT kind, payload_json FROM heimdall_delivery
+ WHERE kind IN ('assign_ticket', 'close_ticket', 'gm_action', 'identity_login', 'identity_logout')
+ ORDER BY id DESC LIMIT 5;
 ```
-SOAP.Enabled = 1
-SOAP.IP = "127.0.0.1"
-SOAP.Port = 7878
-```
 
-Keep it on loopback. It accepts GM commands, so exposing it publicly is the same as handing out a
-console.
-
-Then create a dedicated game account for the bot and give it GM rights, at the worldserver console:
-
-```
-account create heimdallsoap <a strong password>
-account set gmlevel heimdallsoap 3 -1
-```
-
-The level matters: the bot assigns and closes tickets, and a lower level fails with a permission
-error that looks like a bug. Use a separate account rather than a person's, so its actions are
-identifiable in the command audit log.
-
-Put that account's name and password in `SOAP_USER` and `SOAP_PASSWORD`, and the URL in `SOAP_URL`.
+Every row is fields. No row contains a command.
 
 ## 4. Configure private storage and secrets
 
@@ -145,8 +146,8 @@ archive: /var/lib/heimdall/archive (not under a public web root)
 ```
 
 Copy `.env.example` to the environment location and replace every placeholder.
-Keep MySQL and SOAP loopback-only. The token, database password, SOAP password,
-and environment file must never be committed or shared in tickets/screenshots.
+Keep MySQL loopback-only. The token, the database password, and the environment
+file must never be committed or shared in tickets/screenshots.
 
 ## 5. Install and start
 
@@ -154,7 +155,7 @@ Install Node.js 20 or later and production dependencies, copy
 `deploy/heimdall-bot.service` to the system service directory, review its
 paths, reload service definitions, enable it, and start it. Follow your Linux
 distribution's normal service-management procedure. The bot opens no public web
-listener; it connects out to Discord and locally to MySQL/SOAP.
+listener; it connects out to Discord and locally to MySQL.
 
 ## 6. Running the bot on your platform
 
@@ -198,20 +199,17 @@ The module half needs nothing special: clone this repository into the core's `mo
 core patch, and `docker compose up -d --build`. The build context includes `modules/`, so the module
 is compiled in, and the schema imports itself through `ac-db-import` like any other module's SQL.
 
-Five things are Docker-specific, and four of them will stop you.
+Four things are Docker-specific, and three of them will stop you.
 
 **The database port collides.** The shipped compose publishes MySQL on host port **3306**, which is
 whatever MySQL you already have installed. Compose reads a `.env` beside `docker-compose.yml`:
 
 ```
 DOCKER_DB_EXTERNAL_PORT=127.0.0.1:64306
-DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878
 ```
 
-Nothing inside the network uses these; services reach each other by name. The `127.0.0.1:` prefix
-keeps the published ports on the host's loopback rather than every interface, which matters most for
-SOAP — it is remote command execution on your realm, and the shipped default exposes it to your
-whole network.
+Nothing inside the network uses this; services reach each other by name. The `127.0.0.1:` prefix
+keeps the published port on the host's loopback rather than on every interface.
 
 **`heimdall.conf` is an ordinary file, but nothing creates it.** The config directory is bind-mounted
 from `./env/dist/etc` in your checkout, so you edit it with any editor. The container's entrypoint
@@ -226,21 +224,17 @@ cp env/dist/etc/modules/heimdall.conf.dist env/dist/etc/modules/heimdall.conf
 Then restart the worldserver. (AzerothCore also accepts `AC_`-prefixed environment variables —
 `AC_HEIMDALL_GM_CHAT_TAG` and so on — if you would rather keep configuration in Compose.)
 
-**SOAP must listen on all interfaces, not loopback.** `SOAP.IP` defaults to `127.0.0.1`, which
-inside a container is the container. A bot in another container cannot reach it. Set
-`SOAP.IP = "0.0.0.0"` in `env/dist/etc/worldserver.conf`. That is safe here precisely because the
-published port is bound to the host's loopback above: the port is reachable on the Compose network
-and nowhere else.
-
 **The shipped MySQL grants do not apply.** `deploy/mysql-grants.sql` grants to `'heimdall_bot'@'localhost'`
 and `@'127.0.0.1'`. A bot in another container connects from neither — it arrives from the Compose
 network's address range. Grant to `'heimdall_bot'@'%'` instead; the network is isolated, and the
 account still reaches only the seven `heimdall_*` tables.
 
-**Addresses are service names.** `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`,
-`SOAP_URL=http://ac-worldserver:7878/`. `127.0.0.1` in a container is the container itself. If MySQL
-or the worldserver runs on the host instead, `host.docker.internal` reaches it on Docker Desktop; on
-Linux that needs `--add-host=host.docker.internal:host-gateway`.
+**Addresses are service names.** `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`. `127.0.0.1` in a
+container is the container itself. If MySQL runs on the host instead, `host.docker.internal` reaches
+it on Docker Desktop; on Linux that needs `--add-host=host.docker.internal:host-gateway`.
+
+The bot container needs to reach the database and nothing else — it sends the realm no commands, so
+there is no second address to get right and no port to publish for it.
 
 `deploy/docker-compose.bot.yml` is a worked example of the bot container, and `Dockerfile` in this
 directory builds its image. Copy the fragment to `docker-compose.override.yml` in your core

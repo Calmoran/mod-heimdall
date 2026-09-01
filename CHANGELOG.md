@@ -3,6 +3,40 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 1.1.0 — 2026-08-31
+
+The bot no longer holds any credential for the realm. This is the release to point at if anyone asks
+what your Discord bot is allowed to do on your server.
+
+### Changed
+
+- **The realm's own module runs Heimdall's commands.** Claiming a ticket, closing one, holding a GM
+  identity and the five GM actions are now asked for rather than sent: the bot writes a row naming
+  an action and its arguments as separate fields, and the module leases that row and performs the
+  action inside the worldserver, through the core's own command handlers.
+
+  The command text is composed in the module, from a fixed list of actions. Nothing the bot writes
+  is executed as a command, so a compromised bot can queue "close ticket 7" and cannot express
+  `.ban` — there is no field that could carry one. The boundary is structural rather than a
+  question of trusting the bot, which is the only kind of assurance worth offering.
+
+  The bot's whole access to the realm is now its MySQL account: per-table grants on seven
+  `heimdall_*` tables, no DDL, loopback only. `docs/INSTALL-bot.md` has a query you can run to
+  confirm for yourself that what the bot queues is fields and never commands.
+
+- **A staff member's click reaches the realm in about a second.**
+  `Heimdall.DeliveryPollSeconds` now defaults to **1**, was 5. It used to be a background retry
+  cadence; it is now also the delay between pressing a ticket control and the realm acting on it.
+  Your own `heimdall.conf` is never rewritten by an upgrade, so an install carrying the old value
+  keeps it — change the line yourself to get the new responsiveness. Raising it makes every ticket
+  control slower by the amount you raise it.
+
+- **`Heimdall.DeliveryMaxAttempts` is new**, default 12, matching the bot's `DELIVERY_MAX_ATTEMPTS`.
+  Both halves now fail a queued job by the same rule — same attempt count, same backoff, same
+  definition of dead — so a command the realm gives up on is buried exactly as one the bot gives up
+  on, and the warning after the third failure and the dead letter still arrive in the ticket
+  channel, naming the action and the true number of attempts.
+
 ## 1.0.0 — 2026-08-31
 
 The first release verified end to end on all three supported platforms: Windows, Linux and Docker.
@@ -98,13 +132,13 @@ First public release.
 An AzerothCore module that bridges in-game GM tickets to Discord. Tickets appear as private Discord
 channels; staff claim and answer them there; replies reach the player in game as whispers from a
 real GM character. The module reads `gm_ticket` and never writes it — every in-game change goes
-through documented GM commands over SOAP.
+through documented GM commands.
 
 ### The realm module
 
 - **Read-only ticket polling** that resumes from a persisted per-realm watermark. An idle realm
   writes nothing; a restarted worldserver does not re-announce tickets it has already seen.
-- **Closure from either side.** Tickets closed in Discord close in game (`.ticket close` over SOAP);
+- **Closure from either side.** Tickets closed in Discord close in game (`.ticket close`);
   tickets closed in game — including a player abandoning theirs, or a GM at the console — close in
   Discord, with the same channel move, notice and retention clock.
 - **GM identities held in world.** Each configured identity is a real character brought into the
@@ -114,7 +148,7 @@ through documented GM commands over SOAP.
 - **A published identity list.** The names that survive startup validation are published to the
   bot, so a typo in `/ticket staff-add` is refused when it is made, not discovered mid-conversation.
 - **A GM command audit trail** (`Heimdall.CommandAuditEnabled`) batched to Discord, with the bot
-  attributing its own SOAP commands to the Discord user who pressed the button.
+  attributing the commands it causes to the Discord user who pressed the button.
 - **Multi-realm support**: tickets carry a realm tag, so several realms can share one Characters
   database without colliding.
 - **A startup line that states the resolved configuration** — command audit, GM chat tag, poll
@@ -167,7 +201,7 @@ through documented GM commands over SOAP.
   independent of whether the Discord channel still exists.
 - **A GM command audit channel** (`COMMAND_AUDIT_CHANNEL`, on by default, one switch for both
   writers) recording what the bot ran and which Discord user asked for it — the realm's own log
-  attributes every SOAP command to "Console".
+  attributes every one of them to "Console".
 - **Logs that answer the first three support questions**: version, run id and pid on the startup
   line; a permissions preflight that names what is missing, where, and what breaks; and secrets
   redacted before anything reaches the log file, whatever path they took.
@@ -176,8 +210,8 @@ through documented GM commands over SOAP.
 
 - One small core patch (shipped in `patches/`, 15 lines, no behaviour change) is required before
   building. An upstream pull request is planned so the step can eventually disappear.
-- The bot must run on the same host as the realm — it needs loopback MySQL and loopback SOAP — and
-  its database account is scoped to the module's own `heimdall_*` tables. It is never given access
-  to player data or `gm_ticket`.
+- The bot must run on the same host as the realm — it needs loopback MySQL — and its database
+  account is scoped to the module's own `heimdall_*` tables. It is never given access to player
+  data or `gm_ticket`.
 - Windows is tested end to end. Linux and Docker should work and are documented, but no one has run
   them yet; reports welcome.

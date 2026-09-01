@@ -17,7 +17,7 @@ COPY src ./src
 # path exists and is writable even when it is not mounted.
 RUN mkdir -p /var/lib/heimdall/archive && chown -R node:node /var/lib/heimdall /app
 
-# Never root. The bot opens no listener; it connects out to Discord and inward to MySQL and SOAP.
+# Never root. The bot opens no listener; it connects out to Discord and inward to MySQL.
 USER node
 
 CMD ["node", "src/index.js"]

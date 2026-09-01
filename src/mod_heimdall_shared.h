@@ -19,13 +19,20 @@ constexpr char const* LOG_FILTER = "module.heimdall";
 
 // Kept in step with the companion bot's package.json version: the two halves release together, so
 // one number answers "which Heimdall are you running" for both.
-constexpr char const* HEIMDALL_VERSION = "1.0.0";
+constexpr char const* HEIMDALL_VERSION = "1.1.0";
 
 struct Settings
 {
     bool enabled = false;
     uint32 ticketPollSeconds = 15;
-    uint32 deliveryPollSeconds = 5;
+    // One second, not five. The bot no longer reaches the realm over SOAP: a staff member pressing
+    // Revive or Close queues a row that this poll picks up, so this interval is now the whole of
+    // the delay between the button and the effect in game, not a background retry cadence.
+    uint32 deliveryPollSeconds = 1;
+    // Mirrors the bot's DELIVERY_MAX_ATTEMPTS. Both halves fail a job by the same rule so a job
+    // the module gives up on is buried exactly as one the bot gives up on, and the bot's
+    // dead-letter still fires.
+    uint32 deliveryMaxAttempts = 12;
     uint32 maxWhisperBytes = 240;
     uint32 archiveRetentionDays = 180;
     std::string realmPrefix;
@@ -64,6 +71,13 @@ void RegisterCommandAuditScript();
 void ConfigureCommandAudit(std::string realmTag, uint32 batchSeconds, uint32 maxLines);
 void UpdateCommandAudit(uint32 diff);
 void FlushCommandAudit();
+
+// --- Realm commands (mod_heimdall.cpp) ---------------------------------------------------
+// Runs one command through the core's own parser and handlers and captures what it printed.
+// This is the path SOAP takes minus the network: ACSoap queues a CliCommandHolder, which is a
+// CliHandler, which is what this builds. Returns false when the command was refused, with the
+// core's own reason in `output`.
+bool RunRealmCommand(std::string const& command, std::string& output);
 }
 
 #endif

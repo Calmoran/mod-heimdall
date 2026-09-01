@@ -1,8 +1,8 @@
 # Configuration reference
 
-`DISCORD_TOKEN`, the guild ID, `DISCORD_STAFF_ROLE_IDS`, MySQL values, SOAP
-values, archive path, and `BOT_INSTANCE_ID` are required. The exact variables and
-safe sample values are in `.env.example`.
+`DISCORD_TOKEN`, the guild ID, `DISCORD_STAFF_ROLE_IDS`, MySQL values, archive
+path, and `BOT_INSTANCE_ID` are required. The exact variables and safe sample
+values are in `.env.example`.
 
 Roles are configured as two comma-separated ID lists — names never matter:
 
@@ -48,8 +48,8 @@ channels it can neither read nor repair.
 - `AUTO_CLOSE_INACTIVE_DAYS`: close tickets nobody has touched for this many days; `0`
   disables it; default 0.
 - `COMMAND_AUDIT_CHANNEL`: whether the `gm-command-audit` channel exists at all; default on.
-  It governs both writers — the module's command log, and the bot's record of the SOAP
-  commands it issues on a named person's behalf — because they share one channel and
+  It governs both writers — the module's command log, and its record of which Discord user
+  asked for each command it ran — because they share one channel and
   splitting the decision is what made the bot's half impossible to enable. Off means the
   channel is never created, never recreated if you delete it, and entries already queued are
   discarded rather than retried. Leaving it on is recommended: the realm logs every command
@@ -83,6 +83,24 @@ to start if one does not resolve, naming the variable and the id. It cannot
 recover the way it does from a stored id that stopped resolving: creating a
 replacement would leave your `.env` still naming the dead channel, and a new
 category would appear on every restart.
+
+## Module settings worth knowing about
+
+Every `Heimdall.*` setting is documented beside itself in
+[`conf/heimdall.conf.dist`](../conf/heimdall.conf.dist). Two are called out here because 1.1.0
+changed what they do.
+
+- `Heimdall.DeliveryPollSeconds` — **default changed from 5 to 1 in 1.1.0.** It used to be a
+  background retry cadence for queued whispers. It is now also the delay between a staff member
+  pressing Revive, Claim or Close and the realm acting on it, because the bot no longer sends those
+  commands itself - it queues them and this poll performs them. Raising it makes every ticket
+  control slower by the amount you raise it. Your own `heimdall.conf` is not rewritten by the
+  upgrade, so an install that has the old value keeps it: to get the new responsiveness, change
+  the line yourself.
+- `Heimdall.DeliveryMaxAttempts` — new in 1.1.0, default 12. How many times a queued realm command
+  is attempted before it is given up on and reported as a dead letter. Keep it equal to the bot's
+  `DELIVERY_MAX_ATTEMPTS`: both halves fail a job by the same rule, and matching values are what
+  make the bot's warning and dead letter describe the same job.
 
 ## How configuration changes are handled
 

@@ -7,7 +7,7 @@ import path from 'node:path'
 // The bot finds its own; setting it is optional and is verified properly when it is set.
 const required = [
   'DISCORD_TOKEN', 'DISCORD_GUILD_ID', 'MYSQL_HOST', 'MYSQL_DATABASE',
-  'MYSQL_USER', 'MYSQL_PASSWORD', 'SOAP_URL', 'SOAP_USER', 'SOAP_PASSWORD', 'ARCHIVE_DIR', 'BOT_INSTANCE_ID',
+  'MYSQL_USER', 'MYSQL_PASSWORD', 'ARCHIVE_DIR', 'BOT_INSTANCE_ID',
 ]
 
 function positiveInt(value, name, fallback, minimum = 1) {
@@ -149,7 +149,6 @@ export function loadConfig(env = process.env) {
       user: env.MYSQL_USER,
       password: env.MYSQL_PASSWORD,
     },
-    soap: { url: env.SOAP_URL, user: env.SOAP_USER, password: env.SOAP_PASSWORD },
     archiveDir,
     maxAttachmentBytes: positiveInt(env.ARCHIVE_MAX_ATTACHMENT_BYTES, 'ARCHIVE_MAX_ATTACHMENT_BYTES', 10 * 1024 * 1024),
     retentionDays: positiveInt(env.TRANSCRIPT_RETENTION_DAYS, 'TRANSCRIPT_RETENTION_DAYS', 180),

@@ -36,7 +36,6 @@ One repository, two halves: the server module (compiled into your worldserver) a
 - MySQL
 - Node.js 20 or later (for the companion bot)
 - A Discord bot application you control
-- SOAP set up for your server with a dedicated SOAP GM account
 
 ## How to install
 
@@ -118,7 +117,9 @@ one when it needs to.
 an automatic realm tag is never longer than `R255`.
 
 **What Heimdall does not do:** it never writes to `gm_ticket` — every in-game change goes through
-documented GM commands over SOAP. It does not give the bot access to player data; the bot's database
+documented GM commands, run by the module inside the worldserver. The bot has no way to send the
+realm a command of its own choosing: it asks for one of a fixed list of actions, and the module
+composes the command itself. It does not give the bot access to player data; the bot's database
 account reaches only the seven `heimdall_*` tables. It does not link Discord accounts to game
 accounts, so it cannot offer self-service actions on a character. It does not send item or gold
 compensation. And it needs one small core patch to hold a GM identity in the world, which ships with

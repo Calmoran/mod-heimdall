@@ -8,7 +8,6 @@ import { loadConfig } from './config.js'
 import { Logger } from './logger.js'
 import { HeimdallService, ticketAdminCommand } from './discord.js'
 import { TicketRepository } from './repository.js'
-import { SoapClient } from './soap.js'
 
 // The version answers the first question on any bug report. Read from package.json rather than
 // duplicated here, so it cannot disagree with what npm believes is installed.
@@ -85,9 +84,8 @@ async function main() {
 
   const archive = new ArchiveStore(config.archiveDir, config.maxAttachmentBytes)
   await archive.initialize()
-  const soap = new SoapClient(config.soap)
   const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], partials: [Partials.Channel] })
-  const tickets = new HeimdallService({ client, repository, archive, config, soap, logger })
+  const tickets = new HeimdallService({ client, repository, archive, config, logger })
 
   // Everything after login happens in here, and an async listener has nowhere to reject to: a
   // failure in initialize() was an unhandled rejection rather than the readable message

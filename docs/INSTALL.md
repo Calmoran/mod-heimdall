@@ -81,7 +81,7 @@
    `heimdall_%`. There is no second repository: the two halves version together and a single
    `git pull` updates both.
 
-The module only reads `gm_ticket`. All in-game lifecycle changes must use documented AzerothCore GM commands over the existing loopback SOAP service; never grant the bot write access to `gm_ticket`.
+The module only reads `gm_ticket`. Every in-game lifecycle change goes through documented AzerothCore GM commands, which the module runs itself inside the worldserver from a queued intent row; never grant the bot write access to `gm_ticket`.
 
 Set `Heimdall.ArchiveRetentionDays` to the same value as the companion
 bot's `TRANSCRIPT_RETENTION_DAYS` so an in-game ticket that the player closes in
