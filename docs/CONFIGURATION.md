@@ -98,9 +98,7 @@ Every `Heimdall.*` setting is documented beside itself in
   (`deploy/create-heimdall-database.sql`). The name must be a plain identifier - letters, digits,
   `_` and `$`, at most 64 characters - and must not be the realm's characters database: the module
   refuses both at startup and disables itself, saying which. Whatever you choose here is what the
-  bot's `MYSQL_DATABASE` must name, and what its MySQL account is granted. Upgrading an install
-  that has its tables in the characters database is covered under "Upgrading from 1.x" in
-  [INSTALL.md](INSTALL.md#upgrading-from-1x).
+  bot's `MYSQL_DATABASE` must name, and what its MySQL account is granted.
 - `Heimdall.DeliveryPollSeconds` — **default changed from 5 to 1 in 1.1.0.** It used to be a
   background retry cadence for queued whispers. It is now also the delay between a staff member
   pressing Revive, Claim or Close and the realm acting on it, because the bot no longer sends those
@@ -133,7 +131,7 @@ An install upgrades without an edit, and without a surprise.
 **It says so, once, at startup.** A superseded setting that is still in use is
 named in a warning that also names its replacement and says it is still
 honoured. A warning that reads like a breakage sends somebody to fix it during
-an outage, which is the opposite of the point. Being told means the migration
+an outage, which is the opposite of the point. Being told means the change
 happens when it suits you, and it means a maintainer reading a pasted log can
 tell how many installs still carry the old shape.
 

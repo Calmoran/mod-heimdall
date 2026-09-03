@@ -41,8 +41,7 @@
 
    If the database is missing or the core's user cannot see it, the module logs
    `Database `heimdall` does not exist, or the core's MySQL user has no rights on it` and disables
-   itself; the realm starts normally without it. Coming from 1.x, where the tables lived in the
-   characters database, read "Upgrading from 1.x" below before starting the new worldserver.
+   itself; the realm starts normally without it.
 
 5. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
 
@@ -112,37 +111,10 @@ the game receives the same retention treatment.
 
 Rollback: set `Heimdall.Enabled = 0`, stop the companion bot, and restart the worldserver during maintenance. Keep Heimdall's database for audit and rollback unless the operator explicitly decides to remove it after a backup.
 
-## Upgrading from 1.x
+## Coming from 1.x
 
-2.0.0 moves Heimdall's tables out of the realm's characters database and into a database of their
-own. The move is a single `RENAME TABLE`: no rows are copied, ids and foreign keys survive, and it
-takes as long as a metadata change takes. In order:
-
-1. Stop the bot and the worldserver. Back up the characters database.
-2. Open `deploy/migrate-to-heimdall-db.sql` and replace the placeholders: the characters database
-   name, the new database name (the value of `Heimdall.Database`; `heimdall` unless you change
-   it), the core's MySQL user, and the bot's accounts. Run it as a MySQL administrator. It creates
-   the database, renames the seven tables into it, deletes the `heimdall.sql` row from the
-   characters database's `updates` table so the 1.x installer is forgotten, and replaces the
-   bot's grants - the per-table 1.x grants on the characters database are revoked and the account
-   is given Heimdall's database instead. The check queries at the end of the file should show
-   seven tables in the new database, none left in the old one, and `SHOW GRANTS` naming only the
-   new one.
-3. Install the 2.0.0 worldserver. Add `Heimdall.Database` to `heimdall.conf` only if you chose a
-   name other than `heimdall`.
-4. Set `MYSQL_DATABASE` in the bot's `.env` to the new database name.
-5. Start the worldserver, then the bot. `Heimdall.log` should say
-   `Heimdall schema ready in `heimdall`: 7 tables, schema version 1 (already present)`.
-
-The order matters in one place. A 2.0.0 worldserver started before the migration finds the tables
-still in the characters database and none in the new one, logs `This is a Heimdall 1.x install
-that has not been migrated`, and disables itself rather than create a second, empty set beside the
-real one. Nothing is changed; run the migration and start it again.
-
-Undo: `deploy/rollback-to-characters-db.sql` renames the tables back and restores the 1.x grants,
-for a return to a 1.x module. It does not restore the `updates` row - a 1.x worldserver that misses
-it re-applies its `heimdall.sql`, which is `CREATE TABLE IF NOT EXISTS` over tables that exist, and
-records it again.
+There is no upgrade path from 1.x: drop the seven `heimdall_*` tables from the characters database
+and install 2.0.0 fresh.
 
 ## Keeping the repository outside the core tree
 

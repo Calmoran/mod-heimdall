@@ -6,13 +6,20 @@ repository, and each prints the version in its startup line.
 ## 2.0.0 — 2026-09-02
 
 Heimdall's tables leave the realm's characters database, and the ticket channel is rebuilt around
-what a GM actually does in it. This is a major version because the move is a one-time migration on
-every existing install, because it changes the one sentence that matters most about the bot - **the
-bot never connects to a realm database. Its database contains Heimdall's own tables and nothing
-else** - and because staff will find the interface behaves differently on the first ticket after
-the upgrade.
+what a GM actually does in it. This is a major version because it changes the one sentence that
+matters most about the bot - **the bot never connects to a realm database. Its database contains
+Heimdall's own tables and nothing else** - and because staff will find the interface behaves
+differently on the first ticket.
 
-### The ticket channel, if you are coming from 1.x
+**You must:** create Heimdall's database and grant the core's user rights on it
+(`deploy/create-heimdall-database.sql` does both), create the bot's MySQL account and grant it that
+database and nothing else (`bot/deploy/mysql-grants.sql`), and set `MYSQL_DATABASE` in the bot's
+`.env` to match. `docs/INSTALL.md` has the sequence.
+
+**There is no upgrade path from 1.x: drop the seven `heimdall_*` tables from the characters
+database and install 2.0.0 fresh.**
+
+### The ticket channel
 
 Nothing here needs configuring. It is written down because your staff will notice all of it.
 
@@ -23,8 +30,8 @@ Nothing here needs configuring. It is written down because your staff will notic
   then history, then the player's background, and truncates the ticket text last - **and it always
   prints what it left out**. Nothing is hidden silently.
 
-  Headers written by 1.x stay as they are until the ticket next changes state, then they are
-  replaced. `/ticket refresh` does it immediately.
+  A header written by an earlier Heimdall in the same guild stays as it is until the ticket next
+  changes state, then it is replaced. `/ticket refresh` does it immediately.
 
 - **Successful button presses no longer say anything.** Claim, Reply, the identity toggle, Add
   Note, Remove Note, Refresh, the GM actions and Reopen used to each answer with a private message
@@ -112,16 +119,9 @@ Nothing here needs configuring. It is written down because your staff will notic
   moved from `data/sql/db-characters/base/heimdall.sql` to `deploy/heimdall-schema.sql`, the same
   text is compiled into the module, and on startup it creates whatever is missing and records a
   schema version in `heimdall_setting`. A test fails the build if the two copies differ by a byte.
-  The startup guard refuses to run against a 1.x install that has not been migrated - it finds the
-  tables in the characters database and none in Heimdall's, says so, and creates nothing - and
-  refuses a schema version newer than it knows.
-
-- **Upgrading is one `RENAME TABLE`.** `deploy/migrate-to-heimdall-db.sql` creates the database,
-  renames the seven tables into it in a single atomic statement - no rows copied, ids and foreign
-  keys intact - forgets the 1.x installer's row in the characters database's `updates` table, and
-  replaces the bot's grants. `deploy/rollback-to-characters-db.sql` is the exact inverse. The
-  steps, and the one ordering mistake the module catches for you, are under "Upgrading from 1.x"
-  in `docs/INSTALL.md`. The bot's `MYSQL_DATABASE` must then name the new database.
+  It refuses to start when the database is missing or ungranted, when the name is the characters
+  database, or when the stored schema version is newer than it knows - creating nothing in every
+  case.
 
 - **Docker creates the database for you.** The compose fragment mounts
   `deploy/docker/heimdall-init.sh` into the MySQL container, which creates Heimdall's database and
@@ -291,7 +291,7 @@ blockers that were all documentation, and the docs now match what actually happe
   poisoned every ticket that person touched.
 
   Staff-add now stores the realm's own spelling and tells you when it corrected you. Rows already
-  stored wrong repair themselves the first time they are used — there is no migration to run.
+  stored wrong repair themselves the first time they are used — there is no SQL to run.
 
 - **A message to the realm that kept failing was given up on in silence.** Twelve attempts over
   roughly 81 minutes, and then the job was buried with nothing said in the channel, before or after.
@@ -348,7 +348,7 @@ first release with Linux tested end to end.
     cannot read a bot installed under `/home` where the module guide's clone puts it.
 - A superseded setting now says so. An install still using `DISCORD_ADMIN_ROLE_ID`,
   `DISCORD_MODERATOR_ROLE_ID` or `DISCORD_GM_ROLE_ID` gets one warning per variable at startup,
-  naming the replacement and saying the old name is still honoured. Nothing breaks; you migrate when
+  naming the replacement and saying the old name is still honoured. Nothing breaks; you move when
   it suits you. How configuration changes are handled is now written down in the configuration
   reference.
 - Limits moved to where the settings they govern are, and `docs/LIMITS.md` is gone. The limits you

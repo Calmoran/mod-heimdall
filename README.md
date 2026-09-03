@@ -69,7 +69,7 @@ Confirm the configure output lists `mod-heimdall` before building.
 
 ### 4) Database
 
-Create Heimdall's own database on the realm's MySQL server and give the core's user rights on it - `deploy/create-heimdall-database.sql` does both. The tables install themselves: on startup the module creates its seven `heimdall_*` tables there from `deploy/heimdall-schema.sql` and touches nothing else. Upgrading from 1.x, where the tables lived in the characters database, is one `RENAME TABLE` - see [Upgrading from 1.x](docs/INSTALL.md#upgrading-from-1x).
+Create Heimdall's own database on the realm's MySQL server and give the core's user rights on it - `deploy/create-heimdall-database.sql` does both. The tables install themselves: on startup the module creates its seven `heimdall_*` tables there from `deploy/heimdall-schema.sql` and touches nothing else.
 
 ### 5) Configuration
 

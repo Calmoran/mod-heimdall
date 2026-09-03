@@ -20,8 +20,6 @@ Discord guild and development realm to verify the following:
   <characters>.characters` fails with `ERROR 1142`, and `SHOW DATABASES` lists Heimdall's
   database and no realm database. Quote the error in the release notes; a claim about a boundary
   is worth exactly what its denial proof is.
-- A 1.x install migrates with `deploy/migrate-to-heimdall-db.sql` to identical row counts in
-  every table, and the ticket lifecycle then runs against the moved rows.
 - Repeated polls and bot restarts do not create duplicate channels, events, or
   player messages.
 - A temporary failure of a queued realm command is leased, retried, and

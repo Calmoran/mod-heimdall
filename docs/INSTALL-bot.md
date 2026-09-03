@@ -315,8 +315,6 @@ all of them cost someone an afternoon.
 ## 8. Upgrading
 
 1. Read the release notes and back up Heimdall's database together with the archive directory.
-   Upgrading from 1.x moves the tables into that database first: follow "Upgrading from 1.x" in
-   [INSTALL.md](INSTALL.md#upgrading-from-1x), then set `MYSQL_DATABASE` in `.env` to its name.
 2. **Stop the bot cleanly** — Ctrl+C, or `systemctl stop`, not a force-kill. A clean stop releases the
    single-instance lock immediately, so the upgraded bot starts at once. A force-kill leaves the lock
    held by a process that no longer exists and the new one waits out a 60-second staleness window,
@@ -346,8 +344,8 @@ all of them cost someone an afternoon.
 10. Smoke test one Discord ticket and one in-game ticket.
 
 Rolling back: stop the bot, restore the previous code and configuration, and rebuild the worldserver
-if the module changed. Restore the table backup only if a migration cannot be carried forward. Do
-not edit `gm_ticket` to force a rollback.
+if the module changed. Restore the table backup only if the release's schema change cannot be
+carried forward. Do not edit `gm_ticket` to force a rollback.
 
 ## 9. Moving Heimdall to a different guild
 
@@ -398,7 +396,7 @@ start, because after the move nothing points at them.
 
 Do not run the bot against both guilds at once by copying the `.env`. The single-instance lock is
 per process and both copies would be answering the same tickets; the second one refuses to start,
-which is the intended outcome but not a migration strategy.
+which is the intended outcome but not a way to move between guilds.
 
 ## 10. Fresh-install verification
 

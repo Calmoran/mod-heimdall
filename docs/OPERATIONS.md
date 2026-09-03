@@ -39,8 +39,9 @@ background, and truncates the ticket text last of all. **It always says what it
 left out**, in small print at the bottom of the player box - "40 notes are not
 shown here" means the notes are on the account, not lost.
 
-Headers written by 1.x are replaced with this layout the first time the ticket
-changes state, or immediately if you run `/ticket refresh`.
+Headers written by an earlier Heimdall in the same guild are replaced with this
+layout the first time the ticket changes state, or immediately if you run
+`/ticket refresh`.
 
 ## What goes where
 
@@ -150,17 +151,16 @@ attachments.
 
 ## Upgrade
 
-Read the release notes, back up, stop the bot, apply any SQL migration the
-release ships (2.0.0 has one: `deploy/migrate-to-heimdall-db.sql`, described in
-INSTALL.md), update the module and bot code, install production dependencies,
+Read the release notes, back up, stop the bot, apply any SQL a release ships,
+update the module and bot code, install production dependencies,
 validate the environment file, then start the bot and inspect its logs. Perform one
 Discord-native and one in-game ticket smoke test.
 
 ## Rollback
 
 Stop the bot. Restore the previous bot code and module build/config, then restore
-the pre-upgrade module-table backup only if its migration cannot be rolled back
-forward safely. Do not edit `gm_ticket` to force a rollback. Keep the queue and
+the pre-upgrade module-table backup only if the release's schema change cannot be
+carried forward safely. Do not edit `gm_ticket` to force a rollback. Keep the queue and
 audit records until the incident is understood.
 
 ## Troubleshooting

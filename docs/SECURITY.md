@@ -88,6 +88,6 @@ Names read back out of the database are still validated before they reach a comm
 database is not a trusted source of command text either — a stored name containing a space would
 otherwise become a second argument.
 
-**If you run 1.x**, this is fixed in 2.0.0 and there is no configuration change to make. The
-exposure required write access to Heimdall's database, which is also the point at which someone
-could alter tickets directly.
+**If you are still on 1.1.x**, this is fixed in 2.0.0 and there is no configuration change to
+make. The exposure required write access to Heimdall's database, which is also the point at which
+someone could alter tickets directly.
