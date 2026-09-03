@@ -1,4 +1,4 @@
-import { eventKey, ticketPublicKey } from './domain.js'
+import { eventKey, intakeDescription, ticketPublicKey } from './domain.js'
 
 export class TicketRepository {
   // runId identifies this PROCESS and owns both the instance lock and the delivery leases. label is
@@ -328,6 +328,69 @@ export class TicketRepository {
     await this.setSetting(this.threadSettingKey(ticketId), threadId)
   }
 
+  // The header used to be found by scanning a channel for an embed whose title matched the ticket
+  // key. A Components V2 message has no embed and no title, so the id is remembered instead - in
+  // the settings table, beside the thread id, for the same reason: the schema is frozen and this
+  // needs no column. Two keys, because a Discord-native ticket has two headers: the staff one in
+  // the private thread and the player-safe one in the channel.
+  headerSettingKey(ticketId, which) {
+    return which === 'player' ? `discord.ticket_player_header.${ticketId}` : `discord.ticket_header.${ticketId}`
+  }
+
+  async getHeaderId(ticketId, which = 'staff') {
+    return this.getSetting(this.headerSettingKey(ticketId, which))
+  }
+
+  async setHeaderId(ticketId, messageId, which = 'staff') {
+    await this.setSetting(this.headerSettingKey(ticketId, which), messageId)
+  }
+
+  // Who has been granted access to a closed ticket's channel. Stored rather than applied once,
+  // because refreshVisibility rebuilds the overwrite list with permissionOverwrites.set() and
+  // would wipe an overwrite that only existed on Discord's side.
+  grantSettingKey(ticketId) {
+    return `discord.ticket_grants.${ticketId}`
+  }
+
+  async ticketGrants(ticketId) {
+    const raw = await this.getSetting(this.grantSettingKey(ticketId))
+    if (!raw) return []
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : []
+    } catch {
+      return []
+    }
+  }
+
+  async addTicketGrant(ticketId, discordUserId) {
+    const current = await this.ticketGrants(ticketId)
+    if (current.includes(discordUserId)) return current
+    const next = [...current, discordUserId]
+    await this.setSetting(this.grantSettingKey(ticketId), JSON.stringify(next))
+    return next
+  }
+
+  // The durable ticket body. It used to be read back out of the Discord embed's own description
+  // and written straight back in, which worked only because an embed was there to hold it. The
+  // events have always carried it; this reads the one that is current.
+  async ticketBody(ticket) {
+    if (ticket.source === 'ingame') {
+      const [[row]] = await this.pool.execute(
+        "SELECT payload_json FROM heimdall_event WHERE ticket_id = ?"
+        + " AND event_type IN ('ingame_ticket_observed', 'ingame_ticket_closed')"
+        + ' ORDER BY id DESC LIMIT 1',
+        [ticket.id],
+      )
+      if (!row) return null
+      const payload = typeof row.payload_json === 'string' ? JSON.parse(row.payload_json) : row.payload_json
+      return payload?.description ?? null
+    }
+    const intake = await this.ticketIntake(ticket.id)
+    if (!intake) return null
+    return intakeDescription(ticket.category, intake) || null
+  }
+
   // Everything the queue board shows, computed by MySQL so the board never disagrees with the
   // database about how long something has been waiting.
   async queueSnapshot() {
@@ -349,6 +412,24 @@ export class TicketRepository {
       [ticketId, action],
     )
     return Boolean(row)
+  }
+
+  // hasAudit answers "has this EVER happened", which is the wrong question for anything a ticket
+  // can do twice. A ticket closed in game, reopened, and closed in game again matched the
+  // already-handled guard on the second closure and never reached Discord at all - the channel
+  // sat open with no notice, which is the exact bug closeFromGame was written to fix. Every
+  // once-per-life-of-the-ticket guard has to mean once per life SINCE THE LAST REOPEN.
+  //
+  // Compared on id, not created_at: ids are monotonic, and a close and a reopen inside the same
+  // second are not distinguishable by a TIMESTAMP column.
+  async hasAuditSinceReopen(ticketId, action) {
+    const [[row]] = await this.pool.execute(
+      'SELECT (SELECT MAX(id) FROM heimdall_audit WHERE ticket_id = ? AND action = ?) AS marked,'
+      + " (SELECT MAX(id) FROM heimdall_audit WHERE ticket_id = ? AND action = 'ticket_reopened') AS reopened",
+      [ticketId, action, ticketId],
+    )
+    if (row?.marked === null || row?.marked === undefined) return false
+    return row.reopened === null || row.reopened === undefined || Number(row.marked) > Number(row.reopened)
   }
 
   async ticketsWithOpenWork() {

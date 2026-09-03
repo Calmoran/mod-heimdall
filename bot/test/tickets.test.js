@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { ChannelType, PermissionFlagsBits } from 'discord.js'
+import { ChannelType, MessageFlags, PermissionFlagsBits } from 'discord.js'
 
 import { ADMIN_PERMISSIONS, HeimdallService, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
 import { deriveRunId, loadConfig } from '../src/config.js'
@@ -1014,21 +1014,46 @@ test('the empty-roster fallback without an admin role still lands on someone', a
 // staff content lives in the channel; a Discord ticket's reporter is in the room, so that path
 // keeps the private thread.
 
+// A Components V2 payload is a tree of builders rather than an embed, so these walk it. Everything
+// is normalised through toJSON, so a builder and a message read back from Discord inspect alike.
+function v2Nodes(payload) {
+  const out = []
+  const walk = (items) => {
+    for (const item of items ?? []) {
+      const node = typeof item?.toJSON === 'function' ? item.toJSON() : item
+      out.push(node)
+      walk(node.components)
+    }
+  }
+  walk(payload.components)
+  return out
+}
+
+function v2ActionRows(payload) {
+  return v2Nodes(payload).filter((node) => node.type === 1)
+}
+
+function v2Text(payload) {
+  return v2Nodes(payload).filter((node) => node.type === 10).map((node) => node.content).join('\n')
+}
+
 function headerService({ source, threadId = null, staff = ['s1'] }) {
   const sent = { channel: [], thread: [], threadCreated: 0 }
+  const headerIds = new Map()
   const ticket = {
     id: 5, public_key: source === 'ingame' ? 'R1-5' : 'DIS-000005', source, realm_tag: 'R1',
     status: 'open', claimant_discord_user_id: null, claimant_gm_name: null,
     player_name: source === 'ingame' ? 'Dustpaw' : null, discord_creator_id: source === 'discord' ? '900' : null,
   }
+  let posted = 0
   const thread = {
     isThread: () => true, archived: false,
-    send: async (payload) => { sent.thread.push(payload); return { flags: { bitfield: 0 } } },
+    send: async (payload) => { sent.thread.push(payload); posted += 1; return { id: `msg-${posted}`, flags: { bitfield: 0 } } },
     members: { add: async () => {} },
     messages: { fetch: async () => ({ find: () => null }) },
   }
   const channel = {
-    send: async (payload) => { sent.channel.push(payload); return {} },
+    send: async (payload) => { sent.channel.push(payload); posted += 1; return { id: `msg-${posted}` } },
     messages: { fetch: async () => ({ find: () => null }) },
     threads: { create: async () => { sent.threadCreated += 1; return thread } },
   }
@@ -1045,35 +1070,50 @@ function headerService({ source, threadId = null, staff = ['s1'] }) {
     accountTicketHistory: async () => null,
     playerNotes: async () => [],
     ticketIntake: async () => null,
+    ticketBody: async () => null,
+    staff: async () => null,
+    getHeaderId: async (id, which) => headerIds.get(`${id}:${which}`) ?? null,
+    setHeaderId: async (id, messageId, which) => { headerIds.set(`${id}:${which}`, messageId) },
   }
   service.ticketAccountId = async () => null
-  return { service, sent, ticket, channel }
+  return { service, sent, ticket, channel, headerIds }
 }
 
 test('an in-game ticket creates no thread and carries header plus controls in its channel', async () => {
-  const { service, sent, ticket, channel } = headerService({ source: 'ingame' })
+  const { service, sent, ticket, channel, headerIds } = headerService({ source: 'ingame' })
   const surface = await service.postTicketHeader(channel, ticket, 'hey my quest is stuck')
 
   assert.equal(surface, channel, 'the staff surface for an in-game ticket is the channel itself')
   assert.equal(sent.threadCreated, 0, 'a private thread was created for a channel with no player in it')
   assert.equal(sent.channel.length, 1, 'expected exactly one header message')
-  assert.ok(sent.channel[0].embeds?.length, 'the header embed is missing')
-  assert.equal(sent.channel[0].components.length, 3, 'the consolidated controls should be three rows')
+  const header = sent.channel[0]
+  assert.equal(header.flags, MessageFlags.IsComponentsV2, 'the header did not go out as Components V2')
+  assert.equal(header.embeds, undefined, 'a V2 message may not carry embeds')
+  assert.equal(header.content, undefined, 'a V2 message may not carry content')
+  assert.equal(header.components.length, 2, 'the header should be exactly two containers')
+  assert.equal(v2ActionRows(header).length, 3, 'the consolidated controls should be three rows')
+  assert.match(v2Text(header), /### Ticket R1-5/, 'the recovery marker is missing from the header')
+  assert.match(v2Text(header), /hey my quest is stuck/, 'the ticket body never reached the header')
+  // Without the stored id the next redraw has to fall back to scanning, which is recovery only.
+  assert.equal(headerIds.get('5:staff'), 'msg-1', 'the header message id was not remembered')
 })
 
 test('a Discord ticket still gets its private thread and a player-safe channel header', async () => {
-  const { service, sent, ticket, channel } = headerService({ source: 'discord' })
+  const { service, sent, ticket, channel, headerIds } = headerService({ source: 'discord' })
   const surface = await service.postTicketHeader(channel, ticket, 'my account is broken')
 
   assert.notEqual(surface, channel, 'the reporter is in this channel; staff content must not be')
   assert.equal(sent.threadCreated, 1)
-  // The channel header carries no components and no staff content - the reporter can read it.
+  // The channel header carries no controls and no staff content - the reporter can read it.
   assert.equal(sent.channel.length, 1)
-  assert.equal(sent.channel[0].components, undefined, 'controls leaked into the reporter-visible channel')
+  assert.equal(v2ActionRows(sent.channel[0]).length, 0, 'controls leaked into the reporter-visible channel')
+  assert.match(v2Text(sent.channel[0]), /### DIS-000005/, 'the player header has no recovery marker')
   // The staff header, with the controls, went to the thread.
-  const staffHeader = sent.thread.find((payload) => payload.components?.length)
+  const staffHeader = sent.thread.find((payload) => v2ActionRows(payload).length)
   assert.ok(staffHeader, 'the staff header never reached the thread')
-  assert.equal(staffHeader.components.length, 3)
+  assert.equal(v2ActionRows(staffHeader).length, 3)
+  assert.equal(headerIds.get('5:player') != null, true, 'the player header id was not remembered')
+  assert.equal(headerIds.get('5:staff') != null, true, 'the staff header id was not remembered')
 })
 
 test('an in-game ticket that already has a thread keeps it - controls never exist in two places', async () => {
@@ -1081,7 +1121,9 @@ test('an in-game ticket that already has a thread keeps it - controls never exis
   const surface = await service.postTicketHeader(channel, ticket, 'old ticket')
 
   assert.notEqual(surface, channel, 'a legacy threaded ticket must keep its thread until it closes')
-  const controlsInChannel = sent.channel.filter((payload) => payload.components?.length)
+  // Both headers are Components V2 messages now, so "carries components" no longer separates
+  // them. What must never exist twice is the controls, so that is what this counts.
+  const controlsInChannel = sent.channel.filter((payload) => v2ActionRows(payload).length)
   assert.equal(controlsInChannel.length, 0, 'controls appeared in the channel while the thread still holds them')
 })
 

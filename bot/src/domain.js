@@ -341,3 +341,125 @@ export function memberCanWorkTicket(memberRoleIds, config) {
   // Admins can always work tickets; the admin tier adds authority, it never removes capability.
   return config.staffRoleIds.some((id) => roles.has(id)) || config.adminRoleIds.some((id) => roles.has(id))
 }
+
+// ---------------------------------------------------------------------------------------------
+// The Components V2 header's text budget.
+//
+// Discord counts 4,000 characters across ALL text displays in one message, not per display, and
+// it rejects the whole message when the total is over - so a long ticket body plus a talkative
+// account would take the header down entirely rather than degrade. The embed this replaced had
+// per-field caps that failed the same way, which is why fieldValue() existed.
+//
+// The working budget is deliberately under the real one: truncation notices are themselves text,
+// and the container formatting Discord adds is not free either.
+export const HEADER_TEXT_LIMIT = 4000
+export const HEADER_TEXT_BUDGET = 3400
+// Discord counts every component in the message against one ceiling: containers, the text
+// displays inside them, separators, action rows, and each button or select in those rows.
+export const HEADER_COMPONENT_LIMIT = 40
+const NOTE_BODY_LIMIT = 180
+
+// One notice per kind, and a later step replaces an earlier step's rather than stacking beside
+// it: the ladder can cut notes three times, and "…and 37 more" followed by "…and 2 more" reads
+// as two separate facts when it is one fact getting worse.
+function noticed(state, kind, text) {
+  return { ...state.notices, [kind]: text }
+}
+
+function noticeLines(notices) {
+  return ['notes', 'history', 'context'].map((kind) => notices[kind]).filter(Boolean)
+}
+
+function measure(state) {
+  return [state.headline, state.body, ...state.context, ...state.history, ...state.notes, ...noticeLines(state.notices)]
+    .filter(Boolean).join('\n').length
+}
+
+function notesTo(state, keep) {
+  // state.notes carries one rendered line per note. The count in the notice is the ORIGINAL
+  // number, not the number this particular step removed, so it stays true however many steps run.
+  const real = state.notes.filter((line) => line !== state.noteEmptyLine)
+  if (real.length <= keep) return null
+  const hidden = state.noteCount - keep
+  return {
+    ...state,
+    notes: keep ? real.slice(0, keep) : [],
+    notices: noticed(state, 'notes', keep
+      ? `…and ${hidden} more ${hidden === 1 ? 'note' : 'notes'} on this account.`
+      : `${state.noteCount} ${state.noteCount === 1 ? 'note is' : 'notes are'} not shown here; ${state.noteCount === 1 ? 'it stays' : 'they stay'} on the account.`),
+  }
+}
+
+function historyToCount(state) {
+  if (state.history.length <= 1) return null
+  return {
+    ...state,
+    history: state.history.slice(0, 1),
+    notices: noticed(state, 'history', '…full history in the ticket record.'),
+  }
+}
+
+function contextToEssentials(state) {
+  // The played/account-age line is the one a GM can do without: it is background, where the rest
+  // of the block is who and where the player is right now.
+  const kept = state.context.filter((line) => !line.startsWith('Played:'))
+  if (kept.length === state.context.length) return null
+  return { ...state, context: kept, notices: noticed(state, 'context', '…player background omitted for length.') }
+}
+
+// Least useful first, and the ticket body is never touched until everything else has gone. The
+// body is the reason the ticket exists; a GM who cannot read it has to open the database.
+const LADDER = [notesTo3, notesTo1, notesTo0, historyToCount, contextToEssentials]
+function notesTo3(state) { return notesTo(state, 3) }
+function notesTo1(state) { return notesTo(state, 1) }
+function notesTo0(state) { return notesTo(state, 0) }
+
+// Trims a note's own text before it ever reaches the ladder. One note may run to 1,800
+// characters and five of those alone would exhaust the budget.
+export function trimNoteBody(body) {
+  const text = String(body ?? '')
+  return text.length > NOTE_BODY_LIMIT ? `${text.slice(0, NOTE_BODY_LIMIT - 1)}…` : text
+}
+
+// Fits the header's text inside the budget and says what it gave up. Pure: it takes rendered
+// lines and returns rendered lines, so it is tested directly rather than through a Discord fake.
+export function buildHeaderText(parts, budget = HEADER_TEXT_BUDGET) {
+  let state = {
+    headline: parts.headline ?? '',
+    body: parts.body ?? '',
+    context: [...(parts.context ?? [])],
+    history: [...(parts.history ?? [])],
+    notes: [...(parts.notes ?? [])],
+    noteEmptyLine: parts.noteEmptyLine ?? null,
+    notices: {},
+  }
+  state.noteCount = state.notes.filter((line) => line !== state.noteEmptyLine).length
+
+  for (const step of LADDER) {
+    if (measure(state) <= budget) break
+    const next = step(state)
+    if (next) state = next
+  }
+
+  // Everything else has already gone. What is left is the body, and it is cut with a notice
+  // rather than silently - a GM must never read a truncated sentence as the whole complaint.
+  const over = measure(state) - budget
+  if (over > 0) {
+    const notice = '…truncated. The full text is in the ticket record.'
+    const room = Math.max(0, state.body.length - over - notice.length - 1)
+    state = {
+      ...state,
+      body: room ? `${state.body.slice(0, room)}\n${notice}` : notice,
+    }
+  }
+
+  return {
+    headline: state.headline,
+    body: state.body,
+    context: state.context,
+    history: state.history,
+    notes: state.notes,
+    notices: noticeLines(state.notices),
+    length: measure(state),
+  }
+}

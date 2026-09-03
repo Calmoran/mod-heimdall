@@ -5,21 +5,27 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ChannelType,
+  ContainerBuilder,
   EmbedBuilder,
   LabelBuilder,
   MessageFlags,
   ModalBuilder,
   PermissionFlagsBits,
+  SeparatorBuilder,
+  SeparatorSpacingSize,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
+  TextDisplayBuilder,
   TextInputBuilder,
   TextInputStyle,
 } from 'discord.js'
 
 import {
   GM_ACTIONS,
+  HEADER_COMPONENT_LIMIT,
   MODAL_TEXT_LIMITS,
   TICKET_CATEGORIES,
+  buildHeaderText,
   intakeDescription,
   intakeFields,
   intakeHeadline,
@@ -27,6 +33,7 @@ import {
   safeChannelName,
   sanitizeText,
   splitWowMessage,
+  trimNoteBody,
   validateGmName,
   validateTeleDestination,
 } from './domain.js'
@@ -60,6 +67,11 @@ const DELIVERY_ACTIONS = {
   delete_channel: 'delete this ticket channel',
   gm_command_audit: 'post to the GM command audit channel',
 }
+// The ticket container carries the strongest accent because the body is what a GM opens the
+// channel to read. The context container is deliberately quieter: it is reference, not the point.
+const ACCENT_TICKET = { open: 0xE8A33D, claimed: 0x4F8FF0, closing: 0x4F8FF0, closed: 0x6B7280, cancelled: 0x6B7280 }
+const ACCENT_CONTEXT = 0x3F4451
+const NO_NOTES_LINE = 'No notes on this account.'
 const MARKER_PREFIX = 'mod-heimdall'
 const INSTALL_ID_SETTING = 'discord.install_id'
 // Discord rejects webhook and username values containing "discord" or "clyde"
@@ -1002,106 +1014,196 @@ export class HeimdallService {
     return context?.accountId ?? null
   }
 
-  noteLines(notes) {
-    if (!notes.length) return ['No notes on this account.']
-    return notes.slice(0, 5).map((note) => {
+  // The note's author used to render as a Discord mention, which on the card is a blue pill in
+  // the middle of a sentence and, once that account has left the guild, a bare numeric id. The
+  // roster already maps a Discord id to the GM name the rest of the staff know them by.
+  async staffDisplayName(discordUserId) {
+    if (!discordUserId) return 'staff'
+    const rostered = await this.repository.staff(discordUserId).catch(() => null)
+    if (rostered?.gm_name) return rostered.gm_name
+    const member = this.guild?.members?.cache?.get?.(discordUserId)
+    return member?.displayName ?? member?.user?.username ?? 'staff'
+  }
+
+  async noteLines(notes) {
+    if (!notes.length) return [NO_NOTES_LINE]
+    const shown = notes.slice(0, 5)
+    const names = new Map()
+    for (const note of shown) {
+      if (!names.has(note.actorRef)) names.set(note.actorRef, await this.staffDisplayName(note.actorRef))
+    }
+    return shown.map((note) => {
       const when = new Date(note.createdAt).toISOString().slice(0, 10)
-      // A note may run to 1800 characters. Five of those do not fit in an embed field, and an
-      // oversized field rejects the whole header rather than just the note.
-      const body = note.body.length > 180 ? `${note.body.slice(0, 179)}…` : note.body
-      return `• \`#${note.id}\` ${when} <@${note.actorRef}>: ${body}`
+      return `• \`#${note.id}\` ${when} ${names.get(note.actorRef)} — ${trimNoteBody(note.body)}`
     })
   }
 
-  // An embed field value is capped at 1024 characters and Discord rejects the whole message
-  // when one is over, so every field is fitted here rather than trusted to be short.
-  fieldValue(lines) {
-    const kept = []
-    let length = 0
-    for (const line of lines) {
-      const cost = line.length + (kept.length ? 1 : 0)
-      if (length + cost > 990) {
-        kept.push(`…and ${lines.length - kept.length} more`)
-        break
-      }
-      kept.push(line)
-      length += cost
+  // Everything the staff header shows, gathered before anything is fitted or rendered. Kept apart
+  // from the rendering so the budget can be tested on real content without a Discord client.
+  async headerParts(ticket, body) {
+    const opened = Math.floor(new Date(ticket.opened_at ?? Date.now()).getTime() / 1000)
+    const who = ticket.source === 'ingame'
+      ? `In-game ticket from **${ticket.player_name ?? 'Unknown'}**`
+      : 'Discord-native ticket'
+    const parts = {
+      headline: `${who} · opened <t:${opened}:R>`,
+      body: body || 'No description supplied.',
+      context: [],
+      history: [],
+      notes: [],
+      noteEmptyLine: NO_NOTES_LINE,
     }
-    return kept.join('\n') || '—'
+
+    if (ticket.source === 'discord') {
+      // What the player told the intake form, so staff can see where the problem is without
+      // reading the description first. Folded into the body rather than kept beside it, so the
+      // budget sees one block and cuts the prose before the summary.
+      const intake = await this.repository.ticketIntake(ticket.id).catch(() => null)
+      const reported = intakeHeadline(ticket.category, intake)
+      if (reported.length) parts.body = `**Reported**\n${reported.join('\n')}\n\n${parts.body}`
+      return parts
+    }
+
+    const context = await this.repository.playerContext(ticket.id).catch(() => null)
+    const accountId = ticket.player_account_id ?? context?.accountId ?? null
+    const [history, notes] = await Promise.all([
+      this.repository.accountTicketHistory(accountId).catch(() => null),
+      this.repository.playerNotes(accountId).catch(() => []),
+    ])
+    parts.context = [
+      ...this.playerContextLines(context),
+      this.onlineLine(context),
+      await this.identityStatusLine(ticket),
+    ]
+    parts.history = this.historyLines(history)
+    parts.notes = await this.noteLines(notes)
+    return parts
   }
 
-  async headerEmbed(ticket, description = '') {
-    const source = ticket.source === 'ingame' ? `In-game ticket from **${ticket.player_name ?? 'Unknown'}**` : 'Discord-native ticket'
-    const embed = new EmbedBuilder()
-      .setTitle(ticket.public_key)
-      .setDescription(`${source}\n\n${description || 'No description supplied.'}`)
-      .setFooter({ text: 'Staff messages are internal. Use Reply to Player for in-game messages.' })
-    // What the player told the intake form, so staff can see where the problem is without reading
-    // the description first.
-    if (ticket.source === 'discord') {
-      const intake = await this.repository.ticketIntake(ticket.id).catch(() => null)
-      const headline = intakeHeadline(ticket.category, intake)
-      if (headline.length) embed.addFields({ name: 'Reported', value: this.fieldValue(headline) })
-    }
-    if (ticket.source === 'ingame') {
-      const context = await this.repository.playerContext(ticket.id).catch(() => null)
-      const accountId = ticket.player_account_id ?? context?.accountId ?? null
-      const [history, notes] = await Promise.all([
-        this.repository.accountTicketHistory(accountId).catch(() => null),
-        this.repository.playerNotes(accountId).catch(() => []),
-      ])
+  // Two containers in one message. The ticket is on top with the strongest accent because the
+  // body is the thing a GM opens the channel to read, and until now it was the thing hardest to
+  // find - one paragraph among six embed fields.
+  //
+  // Text-first on purpose: no thumbnail, no media gallery, no section accessories. Discord
+  // documents the component structure but promises nothing about how an accessory lays out on a
+  // narrow screen, and these are read on a phone.
+  async headerMessage(ticket, body) {
+    const fitted = buildHeaderText(await this.headerParts(ticket, body))
+    const ticketBox = new ContainerBuilder()
+      .setAccentColor(ACCENT_TICKET[ticket.status] ?? ACCENT_TICKET.open)
+      .addTextDisplayComponents(new TextDisplayBuilder().setContent(`${this.headerMarker(ticket)}\n${fitted.headline}`))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addTextDisplayComponents(new TextDisplayBuilder().setContent(fitted.body))
 
-      embed.addFields(
-        { name: 'Player', value: this.fieldValue(this.playerContextLines(context)) },
-        // Both directions of reachability together: can I reach them, and can they reach me.
-        {
-          name: 'Reachable',
-          value: this.fieldValue([
-            this.onlineLine(context),
-            await this.identityStatusLine(ticket),
-          ]),
-        },
-        { name: 'History', value: this.fieldValue(this.historyLines(history)) },
-        { name: 'Notes on this account', value: this.fieldValue(this.noteLines(notes)) },
-      )
+    const contextBox = new ContainerBuilder().setAccentColor(ACCENT_CONTEXT)
+    const heading = ticket.source === 'ingame' ? '### Player context' : '### Staff controls'
+    const blocks = [
+      fitted.context.length ? fitted.context.join('\n') : null,
+      fitted.history.length ? `**History**\n${fitted.history.join('\n')}` : null,
+      fitted.notes.length ? `**Notes on this account**\n${fitted.notes.join('\n')}` : null,
+      fitted.notices.length ? `-# ${fitted.notices.join(' ')}` : null,
+    ].filter(Boolean)
+    contextBox.addTextDisplayComponents(new TextDisplayBuilder().setContent([heading, ...blocks].join('\n')))
+    contextBox.addSeparatorComponents(new SeparatorBuilder().setDivider(false).setSpacing(SeparatorSpacingSize.Small))
+    contextBox.addActionRowComponents(...await this.controls(ticket))
+
+    // A V2 message may carry no content and no embeds; the flag cannot be removed once set.
+    return {
+      components: [ticketBox, contextBox],
+      flags: MessageFlags.IsComponentsV2,
+      allowedMentions: ALLOWED_MENTIONS,
     }
-    return embed
   }
 
   // What the player sees: what the ticket is and where it stands. No controls, no identity
   // status, nothing about how staff are working it.
-  playerHeaderEmbed(ticket, description = '') {
+  playerHeaderMessage(ticket, body) {
     const status = ticket.status === 'open' ? 'Open, waiting for a staff member'
       : ticket.status === 'claimed' ? 'A staff member is looking at this'
         : ticket.status === 'closing' ? 'Being wrapped up'
           : 'Closed'
-    return new EmbedBuilder()
-      .setTitle(ticket.public_key)
-      .setDescription(description || 'No description supplied.')
-      .addFields({ name: 'Status', value: status })
-      .setFooter({ text: 'Reply here and a staff member will see it.' })
+    const fitted = buildHeaderText({ headline: `**${status}**`, body: body || 'No description supplied.' })
+    const box = new ContainerBuilder()
+      .setAccentColor(ACCENT_TICKET[ticket.status] ?? ACCENT_TICKET.open)
+      .addTextDisplayComponents(new TextDisplayBuilder()
+        .setContent(`${this.playerHeaderMarker(ticket)}\n${fitted.headline}`))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addTextDisplayComponents(new TextDisplayBuilder().setContent(fitted.body))
+      .addTextDisplayComponents(new TextDisplayBuilder().setContent('-# Reply here and a staff member will see it.'))
+    return { components: [box], flags: MessageFlags.IsComponentsV2, allowedMentions: ALLOWED_MENTIONS }
   }
 
-  async findHeaderMessage(channel, ticket) {
-    if (!channel) return null
-    const messages = await channel.messages.fetch({ limit: 100 })
-    return messages.find((message) => message.author.id === this.client.user.id
-      && message.embeds.some((embed) => embed.title === ticket.public_key)) ?? null
+  headerMarker(ticket) {
+    return `### Ticket ${ticket.public_key}`
+  }
+
+  playerHeaderMarker(ticket) {
+    return `### ${ticket.public_key}`
+  }
+
+  // A Components V2 message has no embed and no title, so the old lookup - scan the channel for
+  // an embed titled with the ticket key - has nothing to match on. Every text display in the
+  // message, flattened, is what a marker can be found in.
+  messageText(message) {
+    const found = []
+    const walk = (items) => {
+      for (const item of items ?? []) {
+        if (typeof item?.content === 'string') found.push(item.content)
+        if (Array.isArray(item?.components)) walk(item.components)
+      }
+    }
+    walk(message.components)
+    return found.join('\n')
+  }
+
+  // Stored id first, marker scan second, nothing third. The scan is recovery, not the mechanism:
+  // it covers a lost setting and it covers the upgrade, where every open ticket still carries a
+  // 1.x embed header that was never given an id.
+  async resolveHeader(surface, ticket, which = 'staff') {
+    if (!surface) return { message: null, legacy: false }
+    const storedId = await this.repository.getHeaderId(ticket.id, which).catch(() => null)
+    if (storedId) {
+      const known = await surface.messages.fetch(storedId).catch(() => null)
+      if (known) return { message: known, legacy: false }
+      this.logger.warn(`Stored ${which} header ${storedId} for ${ticket.public_key} is gone; searching the channel.`)
+    }
+
+    const messages = await surface.messages.fetch({ limit: 100 }).catch(() => null)
+    if (!messages) return { message: null, legacy: false }
+    const marker = which === 'player' ? this.playerHeaderMarker(ticket) : this.headerMarker(ticket)
+    const mine = messages.find((message) => message.author.id === this.client.user.id
+      && this.messageText(message).split('\n').includes(marker))
+    if (mine) {
+      await this.repository.setHeaderId(ticket.id, mine.id, which).catch(() => null)
+      return { message: mine, legacy: false }
+    }
+
+    // A 1.x header. Its embed cannot be edited into a V2 layout without clearing the embed, and
+    // the change is one-way either way, so it is replaced rather than converted - which is also
+    // the only way it gains a stored id.
+    const legacy = messages.find((message) => message.author.id === this.client.user.id
+      && message.embeds.some((embed) => embed.title === ticket.public_key))
+    if (legacy) return { message: legacy, legacy: true }
+    return { message: null, legacy: false }
+  }
+
+  // Kept as the old name for the paths that only ask "is there one already".
+  async findHeaderMessage(channel, ticket, which = 'staff') {
+    const { message, legacy } = await this.resolveHeader(channel, ticket, which)
+    return legacy ? null : message
   }
 
   async postTicketHeader(channel, ticket, description = '') {
     const surface = await this.staffSurface(channel, ticket)
+    const body = description || await this.repository.ticketBody(ticket).catch(() => null) || ''
 
     // New-shape in-game ticket: one header, in the channel, carrying the context card and the
     // controls. There is no player in the room to hide anything from and no second surface to
     // drift out of step.
     if (surface === channel) {
       if (!await this.findHeaderMessage(channel, ticket)) {
-        await channel.send({
-          embeds: [await this.headerEmbed(ticket, description)],
-          components: await this.controls(ticket),
-          allowedMentions: ALLOWED_MENTIONS,
-        })
+        const posted = await channel.send(await this.headerMessage(ticket, body))
+        await this.repository.setHeaderId(ticket.id, posted.id, 'staff')
         await this.warnChannelIfRosterEmpty(channel, ticket)
       }
       return channel
@@ -1109,15 +1211,13 @@ export class HeimdallService {
 
     // Discord-originated (and legacy threaded) tickets: the reporter can read the channel, so the
     // channel gets the player-safe header and everything staff-facing stays in the private thread.
-    if (!await this.findHeaderMessage(channel, ticket)) {
-      await channel.send({ embeds: [this.playerHeaderEmbed(ticket, description)], allowedMentions: ALLOWED_MENTIONS })
+    if (!await this.findHeaderMessage(channel, ticket, 'player')) {
+      const posted = await channel.send(this.playerHeaderMessage(ticket, body))
+      await this.repository.setHeaderId(ticket.id, posted.id, 'player')
     }
     if (!await this.findHeaderMessage(surface, ticket)) {
-      await surface.send({
-        embeds: [await this.headerEmbed(ticket, description)],
-        components: await this.controls(ticket),
-        allowedMentions: ALLOWED_MENTIONS,
-      })
+      const posted = await surface.send(await this.headerMessage(ticket, body))
+      await this.repository.setHeaderId(ticket.id, posted.id, 'staff')
     }
     return surface
   }
@@ -1139,6 +1239,25 @@ export class HeimdallService {
     })
   }
 
+  // Redraws a header in place, replacing a 1.x embed header with the new layout the first time it
+  // is reached. The body no longer travels in the message it is drawn into - it is read from the
+  // events every time - so a redraw cannot lose it, and a header that has to be reposted comes
+  // back complete rather than blank.
+  async redrawHeader(surface, ticket, which, payload) {
+    const { message, legacy } = await this.resolveHeader(surface, ticket, which)
+    if (!message) return null
+    if (!legacy) {
+      await message.edit(payload)
+      return message
+    }
+    const replacement = await surface.send(payload)
+    await this.repository.setHeaderId(ticket.id, replacement.id, which)
+    await message.delete().catch(() => this.logger.warn(
+      `Could not remove the old ${ticket.public_key} header after replacing it; there may be two.`))
+    this.logger.info('Replaced a pre-2.0 ticket header with the new layout', { ticket: ticket.public_key, which })
+    return replacement
+  }
+
   // Keeps both headers honest after any state change. The staff panel carries the controls and
   // the in-game identity status; the player header carries only status.
   async refreshTicketHeader(channel, ticket) {
@@ -1148,28 +1267,17 @@ export class HeimdallService {
     const surface = ticket.source === 'discord' && closedOff
       ? await this.staffThread(channel, ticket)
       : await this.staffSurface(channel, ticket)
+    const body = await this.repository.ticketBody(ticket).catch(() => null) || ''
 
     if (surface === channel) {
       // New-shape in-game: the channel header IS the control surface, so it keeps its components.
-      const header = await this.findHeaderMessage(channel, ticket)
-      if (!header) return
-      const description = header.embeds[0]?.description ?? ''
-      const body = description.split('\n\n').slice(1).join('\n\n')
-      await header.edit({ embeds: [await this.headerEmbed(ticket, body)], components: await this.controls(ticket) })
+      await this.redrawHeader(channel, ticket, 'staff', await this.headerMessage(ticket, body))
       return
     }
 
-    const playerHeader = await this.findHeaderMessage(channel, ticket)
-    if (playerHeader) {
-      const description = playerHeader.embeds[0]?.description ?? ''
-      await playerHeader.edit({ embeds: [this.playerHeaderEmbed(ticket, description)], components: [] })
-    }
+    await this.redrawHeader(channel, ticket, 'player', this.playerHeaderMessage(ticket, body))
     if (!surface) return
-    const staffHeader = await this.findHeaderMessage(surface, ticket)
-    if (!staffHeader) return
-    const description = staffHeader.embeds[0]?.description ?? ''
-    const body = description.split('\n\n').slice(1).join('\n\n')
-    await staffHeader.edit({ embeds: [await this.headerEmbed(ticket, body)], components: await this.controls(ticket) })
+    await this.redrawHeader(surface, ticket, 'staff', await this.headerMessage(ticket, body))
   }
 
   // The controls live in the thread, so an interaction usually arrives from inside it. Falling
