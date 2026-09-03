@@ -131,10 +131,15 @@ Heimdall.CommandAuditBatchSeconds = 10
 Heimdall.CommandAuditMaxLines = 25
 
 # Seconds between refreshes of the player context card shown to staff. Slower than the ticket
-# poll on purpose: it reads the characters and auth databases, and a card a minute out of date is
-# fine. Staff can force an immediate refresh from the ticket's staff thread. Values below 10 are
-# raised to 10.
-Heimdall.ContextRefreshSeconds = 60
+# poll on purpose: it reads the characters and auth databases. It is no longer a minute, because
+# the card now repaints in Discord when the snapshot changes rather than sitting stale until
+# something else happens to the ticket - so a player going offline shows up at roughly this
+# interval instead of at the next lifecycle event.
+#
+# A sweep that finds nothing changed queues nothing, so lowering this costs a query per open
+# ticket, not Discord traffic. Staff can force an immediate repaint with the card's own Refresh
+# Player Info button, which always redraws. Values below 10 are raised to 10.
+Heimdall.ContextRefreshSeconds = 15
 
 ###################################################################################################
 # Sending Heimdall's output to its own file

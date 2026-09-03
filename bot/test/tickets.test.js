@@ -6,16 +6,19 @@ import test from 'node:test'
 
 import { ChannelType, MessageFlags, PermissionFlagsBits } from 'discord.js'
 
-import { ADMIN_PERMISSIONS, HeimdallService, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
+import { ADMIN_PERMISSIONS, HeimdallService, IN_GAME_WORK_THREAD, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
 import { deriveRunId, loadConfig } from '../src/config.js'
 import { Logger } from '../src/logger.js'
 import { TicketRepository } from '../src/repository.js'
 import {
   GM_ACTIONS,
+  HEADER_COMPONENT_LIMIT,
+  HEADER_TEXT_LIMIT,
   MODAL_TEXT_LIMITS,
   TICKET_CATEGORIES,
   archiveExpiry,
   assertTransition,
+  buildHeaderText,
   eventKey,
   intakeDescription,
   intakeFields,
@@ -25,6 +28,7 @@ import {
   sanitizeText,
   splitWowMessage,
   ticketPublicKey,
+  trimNoteBody,
   validateGmName,
   validateTeleDestination,
 } from '../src/domain.js'
@@ -315,9 +319,11 @@ test('the install guide and the preflight name the same permissions', () => {
 // replaced because they are presentation reached through every lifecycle path; everything else,
 // including refreshVisibility itself, is the real method.
 function adminService() {
-  const seen = { upsert: [], disable: [], reopen: [], reassign: [], threadAdds: [], unarchived: 0 }
+  const seen = { upsert: [], disable: [], reopen: [], reassign: [], threadAdds: [], unarchived: 0, overwrites: [], grants: [], audited: [] }
+  // Closed, because /ticket grant refuses a live ticket and every declared subcommand is driven
+  // through this one fake. Nothing else here reads the status.
   const ticket = {
-    id: 7, public_key: 'R1-7', status: 'claimed', source: 'ingame',
+    id: 7, public_key: 'R1-7', status: 'closed', source: 'ingame',
     discord_channel_id: 'chan-7', discord_creator_id: null, claimant_discord_user_id: '900',
   }
   const thread = {
@@ -325,7 +331,10 @@ function adminService() {
     members: { add: async (id) => { seen.threadAdds.push(id) } },
     setArchived: async () => { seen.unarchived += 1 },
   }
-  const channel = { id: 'chan-7', setParent: async () => {}, permissionOverwrites: { set: async () => {} } }
+  const channel = {
+    id: 'chan-7', setParent: async () => {},
+    permissionOverwrites: { set: async (entries) => { seen.overwrites.push(entries) } },
+  }
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
   service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-mod', 'role-gm'] }
@@ -347,10 +356,14 @@ function adminService() {
     gmIdentityNames: async () => ['Helpbot'],
     getTicket: async () => ticket,
     getTicketByChannel: async () => ticket,
+    ticketGrants: async () => seen.grants,
+    addTicketGrant: async (id, userId) => { seen.grants.push(userId); return seen.grants },
+    audit: async (...args) => { seen.audited.push(args) },
   }
+  service.botRoleId = 'role-bot'
   service.refreshQueueBoard = async () => {}
   service.refreshTicketHeader = async () => {}
-  return { service, seen }
+  return { service, seen, ticket }
 }
 
 function adminInteraction(subcommand, roles = ['role-admin']) {
@@ -1722,4 +1735,591 @@ test('the third failure of a module-side job warns, and earlier ones stay quiet'
   assert.equal(sent.length, 2)
   assert.match(sent[1], /given up trying to assign this ticket/)
   assert.match(sent[1], /after 12 attempts/)
+})
+
+// ------------------------------------------------------------------- T12: the header's budget
+// Discord counts 4,000 characters across every text display in one message and rejects the whole
+// message when the total is over. This is the one component that decides what survives, so it is
+// exercised directly rather than through a Discord fake - the lesson from T11's SQL splitter,
+// which was tested only through its neighbours and was wrong.
+
+function bulkNotes(count) {
+  return Array.from({ length: count }, (unused, index) => `• \`#${index}\` 2026-08-04 Helpbot — ${'x'.repeat(170)}`)
+}
+
+test('the header fits inside Discord ceiling however much there is to say', () => {
+  const fitted = buildHeaderText({
+    headline: 'In-game ticket from **Clyde** · opened <t:1788435652:R>',
+    body: 'y'.repeat(12_000),
+    context: ['**Clyde** — level 70 Human Mage', 'Zone: Stormwind', 'Played: 4d 2h · Account age: 310d', 'Last seen: never'],
+    history: ['**200** ticket(s) in the last 180 days.', ...Array.from({ length: 3 }, (u, i) => `• R1-${i} (2026-08-01, closed)`)],
+    notes: bulkNotes(40),
+  })
+  assert.ok(fitted.length <= HEADER_TEXT_LIMIT, `the header would be rejected at ${fitted.length} characters`)
+})
+
+test('the ticket body is the last thing cut, and everything cut is announced', () => {
+  const fitted = buildHeaderText({
+    headline: 'h',
+    body: 'y'.repeat(12_000),
+    context: ['**Clyde** — level 70', 'Played: 4d 2h · Account age: 310d'],
+    history: ['**200** tickets.', '• R1-1 (2026-08-01, closed)'],
+    notes: bulkNotes(40),
+  })
+  assert.equal(fitted.notes.length, 0, 'notes should go before the body is touched')
+  assert.equal(fitted.history.length, 1, 'history should be reduced to its count line')
+  assert.ok(fitted.body.endsWith('The full text is in the ticket record.'), 'the body was truncated silently')
+  assert.ok(fitted.notices.length >= 3, 'something was dropped without saying so')
+  // Silence is the failure mode that matters: a GM must never read a cut sentence as the whole
+  // complaint, nor assume an account has no notes because none fitted.
+  assert.ok(fitted.notices.some((line) => /40 notes are not shown/.test(line)))
+  assert.ok(fitted.notices.some((line) => /full history/.test(line)))
+})
+
+test('a short ticket is left exactly as it was written', () => {
+  const fitted = buildHeaderText({
+    headline: 'h', body: 'My bags are stuck.', context: ['**Clyde** — level 70'], history: ['First ticket.'],
+    notes: ['No notes on this account.'], noteEmptyLine: 'No notes on this account.',
+  })
+  assert.equal(fitted.body, 'My bags are stuck.')
+  assert.deepEqual(fitted.notices, [], 'a header that fits should claim nothing was dropped')
+  assert.deepEqual(fitted.notes, ['No notes on this account.'])
+})
+
+test('one enormous note cannot swallow the budget on its own', () => {
+  assert.equal(trimNoteBody('z'.repeat(1800)).length, 180)
+  assert.ok(trimNoteBody('z'.repeat(1800)).endsWith('…'), 'a trimmed note does not show that it was trimmed')
+  assert.equal(trimNoteBody('short'), 'short')
+})
+
+// ------------------------------------------------------------- T12: the header as a V2 message
+
+function v2HeaderService({ status = 'claimed', notes = 1, historyTotal = 2 } = {}) {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.config = { adminRoleIds: [], staffRoleIds: [] }
+  service.guild = { members: { cache: new Map() } }
+  service.repository = {
+    playerContext: async () => ({
+      name: 'Clyde', level: 70, class: 8, race: 1, zoneId: 1519, online: 1, accountId: 5,
+      accountCreated: 1_700_000_000, totalPlaytime: 350_000, lastLogout: 1_756_800_000, capturedAt: 1_756_900_000,
+    }),
+    accountTicketHistory: async () => ({ total: historyTotal, days: 180, recent: [{ public_key: 'R1-3', status: 'closed', claimant_gm_name: 'Helpbot', opened_at: '2026-08-01' }] }),
+    playerNotes: async () => Array.from({ length: notes }, (u, i) => ({ id: i + 1, createdAt: '2026-08-04', actorRef: '900', body: 'Warned about language' })),
+    staff: async () => ({ gm_name: 'Helpbot' }),
+    getSetting: async () => 'held',
+    ticketIntake: async () => null,
+  }
+  const ticket = {
+    id: 7, public_key: 'R1-147', source: 'ingame', status, player_name: 'Clyde',
+    claimant_discord_user_id: '900', claimant_gm_name: 'Helpbot', realm_tag: 'R1', opened_at: new Date('2026-09-01'),
+  }
+  return { service, ticket }
+}
+
+test('the header goes out as Components V2, with no embed and no content', async () => {
+  const { service, ticket } = v2HeaderService()
+  const payload = await service.headerMessage(ticket, 'My bags are stuck.')
+
+  assert.equal(payload.flags, MessageFlags.IsComponentsV2)
+  assert.equal(payload.embeds, undefined, 'a V2 message may not carry embeds')
+  assert.equal(payload.content, undefined, 'a V2 message may not carry content')
+  assert.equal(payload.components.length, 2, 'the ticket and the player context are two containers')
+})
+
+// Characters are not the only ceiling. Buttons and selects inside the containers count against a
+// separate limit of 40, and nothing in the character budget would notice one more button.
+test('the header stays under Discord component ceiling as well as its character one', async () => {
+  const { service, ticket } = v2HeaderService()
+  const payload = await service.headerMessage(ticket, 'z'.repeat(6000))
+  const nodes = v2Nodes(payload)
+
+  assert.ok(nodes.length <= HEADER_COMPONENT_LIMIT, `the header carries ${nodes.length} components, over the limit of ${HEADER_COMPONENT_LIMIT}`)
+  assert.ok(v2Text(payload).length <= HEADER_TEXT_LIMIT, 'the header is over the character limit')
+  assert.equal(v2ActionRows(payload).length, 3)
+})
+
+test('the ticket body sits in the first container, above the player context', async () => {
+  const { service, ticket } = v2HeaderService()
+  const payload = await service.headerMessage(ticket, 'My bags are stuck.')
+  const [ticketBox, contextBox] = payload.components.map((box) => box.toJSON())
+
+  assert.match(ticketBox.components[0].content, /^### Ticket R1-147/)
+  assert.match(ticketBox.components.at(-1).content, /My bags are stuck\./)
+  assert.match(contextBox.components[0].content, /### Player context/)
+  assert.ok(ticketBox.accent_color !== contextBox.accent_color, 'both containers share one accent, so neither stands out')
+})
+
+test('a note names the GM who wrote it, not a Discord mention', async () => {
+  const { service, ticket } = v2HeaderService({ notes: 1 })
+  const payload = await service.headerMessage(ticket, 'body')
+  assert.match(v2Text(payload), /`#1` 2026-08-04 Helpbot — Warned about language/)
+  assert.doesNotMatch(v2Text(payload), /<@900>/, 'the note still renders the account as a mention')
+})
+
+// --------------------------------------------------------------- T12: finding the header again
+
+function resolveService({ storedId = null, messages = [] } = {}) {
+  const stored = new Map(storedId ? [['7:staff', storedId]] : [])
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.client = { user: { id: 'bot' } }
+  service.repository = {
+    getHeaderId: async (id, which) => stored.get(`${id}:${which}`) ?? null,
+    setHeaderId: async (id, messageId, which) => { stored.set(`${id}:${which}`, messageId) },
+  }
+  const surface = {
+    messages: {
+      fetch: async (arg) => {
+        if (typeof arg === 'string') return messages.find((message) => message.id === arg) ?? Promise.reject(new Error('Unknown Message'))
+        return { find: (predicate) => messages.find(predicate) ?? null }
+      },
+    },
+  }
+  return { service, surface, stored }
+}
+
+function v2Message(id, marker) {
+  return { id, author: { id: 'bot' }, embeds: [], components: [{ type: 17, components: [{ type: 10, content: `${marker}\nsomething` }] }] }
+}
+
+test('the header is found by its stored id without scanning the channel', async () => {
+  const wanted = v2Message('m-1', '### Ticket R1-7')
+  const { service, surface } = resolveService({ storedId: 'm-1', messages: [wanted] })
+  const found = await service.resolveHeader(surface, { id: 7, public_key: 'R1-7' })
+  assert.equal(found.message, wanted)
+  assert.equal(found.legacy, false)
+})
+
+test('a lost stored id falls back to the marker, and the id is remembered again', async () => {
+  const wanted = v2Message('m-2', '### Ticket R1-7')
+  const { service, surface, stored } = resolveService({ storedId: 'gone', messages: [wanted] })
+  const found = await service.resolveHeader(surface, { id: 7, public_key: 'R1-7' })
+  assert.equal(found.message, wanted)
+  assert.equal(stored.get('7:staff'), 'm-2', 'recovery found the header but never wrote its id down')
+})
+
+// Ticket keys share prefixes - R1-14 is a prefix of R1-147 - so the marker is matched as a whole
+// line, never as a substring.
+test('a header is never mistaken for another ticket whose key it starts with', async () => {
+  const other = v2Message('m-3', '### Ticket R1-147')
+  const { service, surface } = resolveService({ messages: [other] })
+  const found = await service.resolveHeader(surface, { id: 7, public_key: 'R1-14' })
+  assert.equal(found.message, null, 'R1-14 adopted R1-147\'s header')
+})
+
+test('a 1.x embed header is reported as legacy rather than returned as the header', async () => {
+  const legacy = { id: 'm-4', author: { id: 'bot' }, embeds: [{ title: 'R1-7' }], components: [] }
+  const { service, surface } = resolveService({ messages: [legacy] })
+  const found = await service.resolveHeader(surface, { id: 7, public_key: 'R1-7' })
+  assert.equal(found.message, legacy)
+  assert.equal(found.legacy, true, 'an embed header would have been edited in place, which Discord refuses')
+})
+
+test('a legacy header is replaced by the new layout, and the old one is removed', async () => {
+  const legacy = { id: 'm-5', author: { id: 'bot' }, embeds: [{ title: 'R1-7' }], components: [], delete: async () => { legacy.deleted = true } }
+  const { service, surface, stored } = resolveService({ messages: [legacy] })
+  surface.send = async () => ({ id: 'm-new' })
+  const replacement = await service.redrawHeader(surface, { id: 7, public_key: 'R1-7' }, 'staff', { components: [] })
+
+  assert.equal(replacement.id, 'm-new')
+  assert.equal(stored.get('7:staff'), 'm-new', 'the replacement header was posted without remembering its id')
+  assert.equal(legacy.deleted, true, 'the 1.x header was left behind beside its replacement')
+})
+
+test('a header whose text has not changed is not edited at all', async () => {
+  const message = v2Message('m-6', '### Ticket R1-7')
+  message.edit = async () => { message.edited = true }
+  const { service, surface } = resolveService({ storedId: 'm-6', messages: [message] })
+  // The same text the message already carries, expressed as an outgoing payload.
+  const payload = { components: [{ type: 17, components: [{ type: 10, content: '### Ticket R1-7\nsomething' }] }] }
+  await service.redrawHeader(surface, { id: 7, public_key: 'R1-7' }, 'staff', payload)
+  assert.equal(message.edited, undefined, 'an identical header was still sent to Discord')
+})
+
+// ------------------------------------------------------------------ T12: the durable ticket body
+
+test('the ticket body is read from the events, for either kind of ticket', async () => {
+  const rows = {
+    ingame: [[{ payload_json: JSON.stringify({ description: 'my bags are stuck' }) }]],
+    intake: [[{ payload_json: JSON.stringify({ intake: { location: 'Stormwind', details: 'my bank is empty' } }) }]],
+  }
+  const repository = Object.create(TicketRepository.prototype)
+  repository.pool = { execute: async (sql) => (sql.includes('ingame_ticket_observed') ? rows.ingame : rows.intake) }
+
+  assert.equal(await repository.ticketBody({ id: 1, source: 'ingame' }), 'my bags are stuck')
+  // A Discord ticket's body is rebuilt from the answers it was opened with, through the same
+  // function that composed it in the first place.
+  const discordBody = await repository.ticketBody({ id: 2, source: 'discord', category: 'support' })
+  assert.match(discordBody, /my bank is empty/)
+})
+
+test('a ticket whose events have been purged renders nothing rather than throwing', async () => {
+  const repository = Object.create(TicketRepository.prototype)
+  repository.pool = { execute: async () => [[]] }
+  assert.equal(await repository.ticketBody({ id: 1, source: 'ingame' }), null)
+  assert.equal(await repository.ticketBody({ id: 2, source: 'discord', category: 'account' }), null)
+})
+
+// ---------------------------------------------------------------- T12: acknowledging in place
+
+function ackInteraction({ modal = false, fromMessage = true, canUpdate = true } = {}) {
+  const seen = { deferUpdate: 0, deferReply: 0, edits: [], replies: [], deleted: 0 }
+  const interaction = {
+    seen, deferred: false, replied: false,
+    isModalSubmit: () => modal,
+    isFromMessage: () => fromMessage,
+    deferReply: async () => { seen.deferReply += 1; interaction.deferred = true },
+    editReply: async (payload) => { seen.edits.push(payload); return payload },
+    reply: async (payload) => { seen.replies.push(payload); interaction.replied = true; return payload },
+    deleteReply: async () => { seen.deleted += 1 },
+  }
+  if (canUpdate) interaction.deferUpdate = async () => { seen.deferUpdate += 1; interaction.deferred = true }
+  return interaction
+}
+
+test('a button press that changes the header is acknowledged with no message at all', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  const interaction = ackInteraction()
+  const ack = await service.beginSilent(interaction)
+
+  assert.equal(ack.silent, true)
+  assert.equal(interaction.seen.deferUpdate, 1)
+  assert.equal(interaction.seen.deferReply, 0, 'a visible reply was created for an invisible outcome')
+  await service.endSilent(interaction, ack, 'Claimed.')
+  assert.deepEqual(interaction.seen.edits, [], 'the silent path still said something')
+  assert.deepEqual(interaction.seen.replies, [])
+})
+
+test('a modal opened from a message can also acknowledge invisibly', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  const interaction = ackInteraction({ modal: true, fromMessage: true })
+  const ack = await service.beginSilent(interaction)
+  assert.equal(ack.silent, true)
+  assert.equal(interaction.seen.deferUpdate, 1)
+})
+
+// The branch that exists because the behaviour above is not proven against live Discord. If a
+// modal submission cannot acknowledge invisibly, the fallback is exactly what shipped before:
+// one ephemeral status, removed shortly after.
+test('a modal Discord does not treat as coming from a message falls back to one ephemeral', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  const interaction = ackInteraction({ modal: true, fromMessage: false })
+  const ack = await service.beginSilent(interaction)
+
+  assert.equal(ack.silent, false)
+  assert.equal(interaction.seen.deferReply, 1)
+  assert.equal(interaction.seen.deferUpdate, 0)
+
+  const timer = await service.endSilent(interaction, ack, 'Saved as note #12.')
+  assert.equal(interaction.seen.edits.length, 1, 'the fallback status was never written')
+  assert.match(interaction.seen.edits[0].content, /note #12/i)
+  assert.ok(timer, 'the fallback status was left on screen forever')
+  clearTimeout(timer)
+})
+
+test('an interaction with no deferUpdate at all still gets a status', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  const interaction = ackInteraction({ canUpdate: false })
+  const ack = await service.beginSilent(interaction)
+  assert.equal(ack.silent, false)
+  assert.equal(interaction.seen.deferReply, 1)
+})
+
+test('errors are still ephemeral, because the person who acted has to see them', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {} }
+  const interaction = ackInteraction()
+  await service.failInteraction(interaction, new Error('Only the assigned staff member can act on this player.'))
+  assert.equal(interaction.seen.replies.length, 1)
+  assert.equal(interaction.seen.replies[0].flags, MessageFlags.Ephemeral)
+})
+
+// ------------------------------------------------------------------ T12: who may do what
+
+function ownershipService(actor) {
+  const service = Object.create(HeimdallService.prototype)
+  service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-staff'] }
+  const roles = actor === 'admin' ? ['role-admin'] : ['role-staff']
+  const interaction = {
+    user: { id: actor === 'claimant' ? '900' : '100' },
+    member: { roles: { cache: new Map(roles.map((id) => [id, {}])) } },
+  }
+  const ticket = { id: 7, public_key: 'R1-7', claimant_discord_user_id: '900' }
+  return { service, interaction, ticket }
+}
+
+function allowed(run) {
+  try { run(); return true } catch { return false }
+}
+
+// The rule the operator set, 2026-09-02: acting on a PLAYER belongs to the claimant, and only the
+// claimant. Administering the TICKET belongs to an administrator. Before this, an admin could
+// teleport or kick a player through somebody else's ticket while being unable to say a word to
+// them about it - the reply path already drew the line the GM actions did not.
+test('acting on a player is the claimant\'s alone; administering the ticket is the admin\'s', () => {
+  const table = [
+    { actor: 'claimant', act: true, administer: true },
+    { actor: 'admin', act: false, administer: true },
+    { actor: 'staff', act: false, administer: false },
+  ]
+  for (const row of table) {
+    const { service, interaction, ticket } = ownershipService(row.actor)
+    assert.equal(allowed(() => service.requireTicketOwner(interaction, ticket)), row.act,
+      `${row.actor} should ${row.act ? '' : 'not '}be able to act on the player`)
+    assert.equal(allowed(() => service.requireAdminOrClaimant(interaction, ticket, 'close this ticket')), row.administer,
+      `${row.actor} should ${row.administer ? '' : 'not '}be able to administer the ticket`)
+  }
+})
+
+test('an unclaimed ticket entitles nobody to act on its player, admin included', () => {
+  for (const actor of ['admin', 'staff', 'claimant']) {
+    const { service, interaction, ticket } = ownershipService(actor)
+    ticket.claimant_discord_user_id = null
+    assert.equal(allowed(() => service.requireTicketOwner(interaction, ticket)), false,
+      `${actor} acted on a player through a ticket nobody is handling`)
+  }
+})
+
+test('the refusal tells an administrator what to do instead', () => {
+  const { service, interaction, ticket } = ownershipService('admin')
+  assert.throws(() => service.requireTicketOwner(interaction, ticket), /ticket reassign/)
+})
+
+// Every GM action has to reach the strict rule. A new action wired to the permissive one would be
+// the whole bug again, quietly.
+test('every GM action goes through the claimant-only check', () => {
+  const source = fs.readFileSync(new URL('../src/discord.js', import.meta.url), 'utf8')
+  const runGmAction = source.slice(source.indexOf('async runGmAction('), source.indexOf('async handleSelect('))
+  assert.match(runGmAction, /this\.requireTicketOwner\(interaction, ticket\)/)
+  assert.doesNotMatch(runGmAction, /requireAdminOrClaimant/, 'a GM action was routed through the administration rule')
+})
+
+// -------------------------------------------------------------------- T12: /ticket grant
+
+test('a closed ticket can be granted to a rostered GM without reopening it', async () => {
+  const { service, seen } = adminService()
+  const interaction = adminInteraction('grant')
+  await service.handleAdminCommand(interaction)
+
+  assert.deepEqual(seen.grants, ['900'], 'the grant was not recorded, so the next redraw would drop it')
+  assert.equal(seen.reopen.length, 0, 'granting reopened the ticket, which is the thing it exists to avoid')
+  assert.equal(seen.audited.at(-1)[1], 'ticket_granted')
+  assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral)
+})
+
+test('the granted user survives the overwrite rebuild that a redraw performs', () => {
+  const { service, ticket } = adminService()
+  service.guild.roles = { everyone: { id: 'everyone' } }
+  const entries = service.overwrites(ticket, ['900'])
+  assert.ok(entries.some((entry) => entry.id === '900'), 'a rebuilt overwrite list dropped the grant')
+})
+
+test('granting a ticket that is still open is refused, and says what to do instead', async () => {
+  const { service, ticket } = adminService()
+  ticket.status = 'claimed'
+  await assert.rejects(() => service.handleAdminCommand(adminInteraction('grant')), /reassign/)
+})
+
+test('ticket administration, grant included, is refused to anyone without the admin role', async () => {
+  const { service } = adminService()
+  await assert.rejects(() => service.handleAdminCommand(adminInteraction('grant', ['role-staff'])), /administrators/)
+})
+
+// --------------------------------------------------------- T12: the context card actually redraws
+
+test('a context update redraws the header and nothing else', async () => {
+  const seen = { refreshedHeader: 0, refreshedVisibility: 0 }
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  const ticket = { id: 7, public_key: 'R1-7', source: 'ingame', status: 'claimed', discord_channel_id: 'chan-7' }
+  service.repository = { getIngameTicket: async () => ticket }
+  service.client = { channels: { fetch: async () => ({ id: 'chan-7' }) } }
+  service.refreshTicketHeader = async () => { seen.refreshedHeader += 1 }
+  service.refreshVisibility = async () => { seen.refreshedVisibility += 1 }
+
+  await service.redrawFromContext({ realmTag: 'R1', sourceTicketId: 42 })
+  assert.equal(seen.refreshedHeader, 1)
+  // Category and permissions are functions of the lifecycle, and a player moving zone is not one.
+  assert.equal(seen.refreshedVisibility, 0, 'a context update rebuilt the channel permissions for nothing')
+})
+
+test('a context update for a closed or channel-less ticket does nothing', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  let redraws = 0
+  service.refreshTicketHeader = async () => { redraws += 1 }
+  service.client = { channels: { fetch: async () => ({ id: 'chan-7' }) } }
+
+  service.repository = { getIngameTicket: async () => ({ id: 7, status: 'closed', discord_channel_id: 'chan-7' }) }
+  await service.redrawFromContext({ realmTag: 'R1', sourceTicketId: 42 })
+  service.repository = { getIngameTicket: async () => ({ id: 7, status: 'claimed', discord_channel_id: null }) }
+  await service.redrawFromContext({ realmTag: 'R1', sourceTicketId: 42 })
+  assert.equal(redraws, 0)
+})
+
+test('the module and the bot agree on how a context update travels', () => {
+  const module = fs.readFileSync(new URL('../../src/mod_heimdall.cpp', import.meta.url), 'utf8')
+  const bot = fs.readFileSync(new URL('../src/discord.js', import.meta.url), 'utf8')
+
+  assert.match(module, /'to_discord', 'context_updated'/, 'the module does not queue a context update')
+  assert.match(bot, /kind === 'context_updated'/, 'the bot has no handler for the row the module queues')
+  // A delivery that fails must be describable in English, like every other kind.
+  assert.match(bot, /context_updated: '[^']+'/, 'context_updated is missing from DELIVERY_ACTIONS')
+})
+
+// The guard that keeps the fifteen-second sweep from becoming two hundred redraws a minute, and
+// the exception that keeps the button honest.
+test('the sweep only queues a redraw when something changed; the button always does', () => {
+  const module = fs.readFileSync(new URL('../../src/mod_heimdall.cpp', import.meta.url), 'utf8')
+  const publish = module.slice(module.indexOf('void PublishPlayerContext'), module.indexOf('class TicketPoller'))
+
+  assert.match(publish, /\{\} = 1 OR e\.id IS NULL/, 'the changed-fields guard is missing')
+  for (const field of ['online', 'zoneId', 'level', 'name']) {
+    assert.ok(publish.includes(`$.${field}`), `${field} is not compared, so a change to it would never redraw`)
+  }
+  assert.ok(!publish.includes("'$.capturedAt'"), 'capturedAt is compared, which makes every sweep a change')
+  assert.match(module, /PublishPlayerContext\(_settings\.realmTag, sourceTicketId, rowPlayerGuid, true\)/,
+    'the Refresh button no longer forces a redraw')
+  assert.match(module, /fields\[1\]\.Get<uint64>\(\), false\)/, 'the timed sweep forces a redraw on every pass')
+})
+
+test('the shipped config default matches the one the module compiles in', () => {
+  const module = fs.readFileSync(new URL('../../src/mod_heimdall.cpp', import.meta.url), 'utf8')
+  const conf = fs.readFileSync(new URL('../../conf/heimdall.conf.dist', import.meta.url), 'utf8')
+  assert.match(module, /"Heimdall\.ContextRefreshSeconds", 15\)/)
+  assert.match(conf, /^Heimdall\.ContextRefreshSeconds = 15$/m)
+})
+
+// ------------------------------------------------------- T12: the GM's words, and their marker
+
+function gmTurnService() {
+  const seen = { webhook: [], channel: [], settings: new Map() }
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = {
+    setSetting: async (key, value) => { seen.settings.set(key, value) },
+    getSetting: async (key) => seen.settings.get(key) ?? null,
+  }
+  const channel = {
+    id: 'chan-7',
+    send: async (payload) => { seen.channel.push(payload.content); return { id: 'plain-1' } },
+  }
+  service.ticketWebhook = async () => ({
+    send: async (payload) => { seen.webhook.push(payload); return { id: 'hook-1' } },
+    editMessage: async (id, payload) => { seen.webhook.push({ edited: id, ...payload }) },
+  })
+  service.client = { channels: { fetch: async () => channel } }
+  return { service, seen, channel }
+}
+
+test('the GM\'s actual words go into the channel, under the identity that spoke them', async () => {
+  const { service, seen } = gmTurnService()
+  await service.postGmTurn({
+    ticket: { player_name: 'Clyde' }, channel: { id: 'chan-7' }, gmName: 'Helpbot',
+    body: 'I can reset that. Please relog.', online: true, turnKey: 'i-1',
+  })
+
+  assert.equal(seen.webhook.length, 1, 'the reply never reached the channel')
+  assert.equal(seen.webhook[0].username, 'Helpbot')
+  assert.match(seen.webhook[0].content, /I can reset that\. Please relog\./)
+  assert.match(seen.webhook[0].content, /sent — Clyde was online/)
+})
+
+test('a reply to an offline player is marked as waiting, not as delivered', async () => {
+  const { service, seen } = gmTurnService()
+  await service.postGmTurn({
+    ticket: { player_name: 'Clyde' }, channel: { id: 'chan-7' }, gmName: 'Helpbot',
+    body: 'have a look now', online: false, turnKey: 'i-2',
+  })
+  assert.match(seen.webhook[0].content, /queued — waits until Clyde logs in/)
+  // The bot queues the whisper and the module performs it; nothing reports back that it landed,
+  // so the marker must never claim it did.
+  assert.doesNotMatch(seen.webhook[0].content, /delivered/)
+})
+
+// The marker's message id has to outlive the process: a whisper is retried for about eighty
+// minutes before it is given up on, and a bot restarted in that window would otherwise have no
+// way back to the line it needs to correct.
+test('the turn\'s message id is persisted, not held in memory', async () => {
+  const { service, seen } = gmTurnService()
+  await service.postGmTurn({
+    ticket: { player_name: 'Clyde' }, channel: { id: 'chan-7' }, gmName: 'Helpbot',
+    body: 'text', online: true, turnKey: 'i-3',
+  })
+  const saved = JSON.parse(seen.settings.get('discord.gm_turn.i-3'))
+  assert.equal(saved.messageId, 'hook-1')
+  assert.equal(saved.channelId, 'chan-7')
+  assert.equal(saved.viaWebhook, true)
+})
+
+test('a whisper Heimdall gives up on corrects the turn that claims it was sent', async () => {
+  const { service, seen } = gmTurnService()
+  await service.postGmTurn({
+    ticket: { player_name: 'Clyde' }, channel: { id: 'chan-7' }, gmName: 'Helpbot',
+    body: 'text', online: true, turnKey: 'i-4',
+  })
+  assert.equal(await service.markGmTurnFailed('i-4'), true)
+  const edit = seen.webhook.at(-1)
+  assert.equal(edit.edited, 'hook-1')
+  assert.match(edit.content, /failed — this never reached Clyde/)
+})
+
+test('a dead letter for a whisper reaches the turn marker', async () => {
+  const { service, seen } = gmTurnService()
+  service.deliveryAudience = async () => ({ channel: { send: async () => {} }, key: 'R1-7' })
+  await service.postGmTurn({
+    ticket: { player_name: 'Clyde' }, channel: { id: 'chan-7' }, gmName: 'Helpbot',
+    body: 'text', online: true, turnKey: 'i-5',
+  })
+  await service.announceDeliveryTrouble(
+    { kind: 'virtual_whisper', ticket_id: 7, payload: { turnKey: 'i-5' } },
+    new Error('the realm refused'),
+    { state: 'dead', attempts: 12 },
+  )
+  assert.ok(seen.webhook.some((entry) => entry.edited === 'hook-1'), 'the dead letter left the turn claiming it was sent')
+})
+
+test('marking a turn failed when nothing was remembered is not an error', async () => {
+  const { service } = gmTurnService()
+  assert.equal(await service.markGmTurnFailed('never-seen'), false)
+  assert.equal(await service.markGmTurnFailed(null), false)
+})
+
+// ------------------------------------------------------------------ T12: the work surface
+
+test('the in-game work thread is one switch, and off means exactly what it did before', async () => {
+  const source = fs.readFileSync(new URL('../src/discord.js', import.meta.url), 'utf8')
+  assert.match(source, /export const IN_GAME_WORK_THREAD = (true|false)/,
+    'the work thread is not behind a single switch the operator can flip')
+  assert.equal(typeof IN_GAME_WORK_THREAD, 'boolean')
+
+  // With it off, an in-game ticket's work surface is its channel - the shape that shipped in 1.x.
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = { getThreadId: async () => null, getSetting: async () => null, setSetting: async () => {} }
+  const channel = { id: 'chan-7', threads: { create: async () => ({ id: 'thread-7' }) } }
+  const ticket = { id: 7, public_key: 'R1-7', source: 'ingame' }
+  const surface = await service.workSurface(channel, ticket)
+  assert.equal(surface === channel, !IN_GAME_WORK_THREAD,
+    IN_GAME_WORK_THREAD ? 'the switch is on but chatter still went to the channel'
+      : 'the switch is off but a thread was created anyway')
+})
+
+test('a Discord ticket keeps its private staff thread as the work surface', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  const thread = { id: 'thread-7', archived: false }
+  service.repository = { getThreadId: async () => 'thread-7' }
+  service.client = { channels: { fetch: async () => thread } }
+  const surface = await service.workSurface({ id: 'chan-7' }, { id: 7, public_key: 'DIS-000007', source: 'discord' })
+  assert.equal(surface, thread)
+})
+
+test('a work thread that cannot be created never costs the action that needed it', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.repository = { getThreadId: async () => null, getSetting: async () => null, setSetting: async () => {} }
+  const channel = { id: 'chan-7', threads: { create: async () => { throw new Error('Missing Permissions') } } }
+  const surface = await service.workSurface(channel, { id: 7, public_key: 'R1-7', source: 'ingame' })
+  assert.equal(surface, channel, 'a note would have been lost because a thread could not be made')
 })

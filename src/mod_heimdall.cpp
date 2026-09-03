@@ -165,7 +165,7 @@ Settings ReadSettings()
     settings.commandAuditMinSecurity = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMinSecurity", 1), 0, 3);
     settings.commandAuditBatchSeconds = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditBatchSeconds", 10));
     settings.commandAuditMaxLines = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMaxLines", 25), 1, 100);
-    settings.contextRefreshSeconds = std::max<uint32>(10, sConfigMgr->GetOption<uint32>("Heimdall.ContextRefreshSeconds", 60));
+    settings.contextRefreshSeconds = std::max<uint32>(10, sConfigMgr->GetOption<uint32>("Heimdall.ContextRefreshSeconds", 15));
     settings.gmChatTag = sConfigMgr->GetOption<bool>("Heimdall.GmChatTag", true);
     settings.database = sConfigMgr->GetOption<std::string>("Heimdall.Database", "heimdall");
 
@@ -623,7 +623,18 @@ private:
 // One row per ticket with a stable event key, updated in place: a refresh must not append history
 // every minute. That does mean this event row is mutable, unlike the append-only lifecycle events
 // beside it, which is a deliberate trade for bounded growth.
-void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, uint64 playerGuidLow)
+//
+// Writing the snapshot was never enough on its own: nothing told Discord it had changed, so the
+// card only ever repainted on a lifecycle event and "Refresh Player Info" appeared to do nothing.
+// A to_discord row is queued alongside the snapshot, and the bot redraws the header on it.
+//
+// `forced` marks the snapshot a GM asked for by pressing that button, as opposed to the one the
+// timed sweep takes on its own. It changes only whether Discord is told: a forced refresh always
+// tells it, so the press has a visible result even when nothing about the player has changed,
+// while the sweep tells it only when something actually did. Without that guard the sweep would
+// queue a row per open ticket per cycle - fifty tickets at fifteen seconds is two hundred rows a
+// minute, and two hundred header redraws behind them.
+void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, uint64 playerGuidLow, bool forced)
 {
     if (!playerGuidLow)
         return;
@@ -662,6 +673,32 @@ void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, ui
     std::ostringstream rawKey;
     rawKey << "ingame:" << realmTag << ':' << sourceTicketId << ":context";
 
+    uint32 capturedAt = uint32(GameTime::GetGameTime().count());
+
+    // Queued BEFORE the snapshot is overwritten, because the comparison is against what Discord
+    // was last shown. capturedAt is deliberately not part of it - it changes on every sweep, so
+    // comparing it would make every sweep a change - but it IS part of the delivery key, so each
+    // real change is its own row and a repeat within the same second collapses onto it.
+    std::ostringstream rawDeliveryKey;
+    rawDeliveryKey << "ingame:" << realmTag << ':' << sourceTicketId << ":context-updated:" << capturedAt;
+
+    CharacterDatabase.Execute(
+        Q("INSERT INTO heimdall_delivery "
+        "(ticket_id, delivery_key, direction, kind, payload_json) "
+        "SELECT t.id, SHA2('{}', 256), 'to_discord', 'context_updated', "
+        "JSON_OBJECT('realmTag', '{}', 'sourceTicketId', {}) "
+        "FROM heimdall_ticket t "
+        "LEFT JOIN heimdall_event e ON e.ticket_id = t.id AND e.event_type = 'player_context' "
+        "WHERE t.source = 'ingame' AND t.realm_tag = '{}' AND t.source_ticket_id = {} "
+        "AND ({} = 1 OR e.id IS NULL "
+        "OR JSON_EXTRACT(e.payload_json, '$.online') <> {} "
+        "OR JSON_EXTRACT(e.payload_json, '$.zoneId') <> {} "
+        "OR JSON_EXTRACT(e.payload_json, '$.level') <> {} "
+        "OR JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.name')) <> '{}') "
+        "ON DUPLICATE KEY UPDATE ticket_id = ticket_id"),
+        Escape(rawDeliveryKey.str()), escapedRealmTag, sourceTicketId, escapedRealmTag, sourceTicketId,
+        forced ? 1 : 0, online ? 1 : 0, zoneId, level, Escape(cache->Name));
+
     CharacterDatabase.Execute(
         Q("INSERT INTO heimdall_event "
         "(ticket_id, event_key, event_type, actor_kind, actor_ref, payload_json) "
@@ -673,7 +710,7 @@ void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, ui
         "ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json)"),
         Escape(rawKey.str()), Escape(cache->Name), Escape(cache->Name), level, uint32(cache->Class), uint32(cache->Race),
         uint32(cache->Sex), zoneId, online ? 1 : 0, cache->AccountId, accountCreated, totalPlaytime, lastLogout,
-        uint32(GameTime::GetGameTime().count()), escapedRealmTag, sourceTicketId);
+        capturedAt, escapedRealmTag, sourceTicketId);
 }
 
 class TicketPoller final : public WorldScript
@@ -1158,7 +1195,7 @@ private:
             // for the next context sweep.
             if (kind == "refresh_player_context")
             {
-                PublishPlayerContext(_settings.realmTag, sourceTicketId, rowPlayerGuid);
+                PublishPlayerContext(_settings.realmTag, sourceTicketId, rowPlayerGuid, true);
                 CharacterDatabase.Execute(
                     Q("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
                     "attempts = attempts + 1, lease_owner = '{}' WHERE id = {} AND state = 'queued'"),
@@ -1507,7 +1544,7 @@ private:
         do
         {
             Field* fields = rows->Fetch();
-            PublishPlayerContext(_settings.realmTag, fields[0].Get<uint32>(), fields[1].Get<uint64>());
+            PublishPlayerContext(_settings.realmTag, fields[0].Get<uint32>(), fields[1].Get<uint64>(), false);
         } while (rows->NextRow());
     }
 

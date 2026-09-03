@@ -63,6 +63,7 @@ const DELIVERY_ACTIONS = {
   virtual_whisper: 'deliver a staff reply to the player in game',
   player_whisper: 'post a player message into Discord',
   sync_ingame_ticket: 'update this ticket from the realm',
+  context_updated: 'redraw this ticket with fresh player information',
   create_discord_ticket: 'create this ticket channel',
   delete_channel: 'delete this ticket channel',
   gm_command_audit: 'post to the GM command audit channel',
@@ -675,11 +676,15 @@ export class HeimdallService {
     }
   }
 
-  overwrites(ticket) {
+  overwrites(ticket, grants = []) {
     const entries = [
       { id: this.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
       { id: this.botRoleId, allow: ADMIN_PERMISSIONS },
       ...this.config.adminRoleIds.map((id) => ({ id, allow: ADMIN_PERMISSIONS })),
+      // /ticket grant. Applied from stored state on every rebuild rather than once at the moment
+      // of granting, because refreshVisibility rebuilds this list with permissionOverwrites.set()
+      // - an overwrite that existed only on Discord's side would be wiped by the next redraw.
+      ...grants.map((id) => ({ id, allow: STAFF_PERMISSIONS })),
     ]
     // The author keeps access only while the ticket is live. Once it is closed the channel
     // disappears for them: a closed ticket is not a place to keep talking, and the transcript is
@@ -1152,16 +1157,24 @@ export class HeimdallService {
   // A Components V2 message has no embed and no title, so the old lookup - scan the channel for
   // an embed titled with the ticket key - has nothing to match on. Every text display in the
   // message, flattened, is what a marker can be found in.
-  messageText(message) {
+  componentText(components) {
     const found = []
     const walk = (items) => {
-      for (const item of items ?? []) {
-        if (typeof item?.content === 'string') found.push(item.content)
+      for (const raw of items ?? []) {
+        // A builder on the way out, a component on the way back in, and the two do not expose
+        // their text the same way.
+        const item = typeof raw?.toJSON === 'function' ? raw.toJSON() : raw
+        const content = item?.content ?? item?.data?.content
+        if (typeof content === 'string') found.push(content)
         if (Array.isArray(item?.components)) walk(item.components)
       }
     }
-    walk(message.components)
+    walk(components)
     return found.join('\n')
+  }
+
+  messageText(message) {
+    return this.componentText(message.components)
   }
 
   // Stored id first, marker scan second, nothing third. The scan is recovery, not the mechanism:
@@ -1255,6 +1268,10 @@ export class HeimdallService {
     const { message, legacy } = await this.resolveHeader(surface, ticket, which)
     if (!message) return null
     if (!legacy) {
+      // The second guard against redraw churn. The module already declines to queue a context
+      // update when nothing meaningful changed; this declines to spend a Discord edit when the
+      // header would come out the same anyway, whatever asked for the redraw.
+      if (this.componentText(payload.components) === this.messageText(message)) return message
       await message.edit(payload)
       return message
     }
@@ -1572,7 +1589,7 @@ export class HeimdallService {
         'Note number, as shown on the card', 'e.g. 12'))
     }
     if (action === 'close' || action === 'close-confirm') {
-      if (!this.isAdmin(interaction) && ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only an administrator or the assigned staff member can close this ticket.')
+      this.requireAdminOrClaimant(interaction, ticket, 'close this ticket')
       // One deliberate click between a misclick and a closed ticket. The note modal that follows
       // is not a confirmation - it can be submitted empty, and a stray click reached it directly.
       if (action === 'close') {
@@ -1613,7 +1630,11 @@ export class HeimdallService {
     if (action === 'identity-toggle' || action === 'identity-login' || action === 'identity-logout') {
       const staff = await this.requireRosteredStaff(interaction)
       if (ticket.source !== 'ingame') throw new Error('This ticket has no in-game side.')
-      if (!this.isAdmin(interaction) && ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only an administrator or the assigned staff member can control the in-game identity.')
+      // Q3, operator: claimant only. Logging a GM's character into the world is acting AS that
+      // GM - it makes their character visible, whisperable and answerable, in every ticket they
+      // hold at once, because identity state is per GM and not per ticket. That is not
+      // administration, so it falls on the player-facing side of the line.
+      this.requireTicketOwner(interaction, ticket)
 
       const gmName = ticket.claimant_gm_name ?? staff.gm_name
       // The toggle acts on what is true NOW, never on the state its label was rendered from - a
@@ -1700,12 +1721,31 @@ export class HeimdallService {
     return timer
   }
 
-  // Only the GM holding the ticket, or an admin. A ticket nobody has claimed has nobody entitled
-  // to act on the player through it.
+  // --------------------------------------------------------------------- who may do what
+  //
+  // Acting on a PLAYER belongs to the GM holding the ticket. Administering the TICKET belongs to
+  // an administrator. The reply path has always drawn that line - a reply speaks as the claiming
+  // GM's identity, so nobody else may send one - but requireTicketOwner let an admin straight
+  // through, which meant an administrator could revive, teleport or kick a player through
+  // somebody else's ticket while being unable to say a word to them about it.
+  //
+  // An admin who needs to act on a player reassigns the ticket to themselves first. That is one
+  // command, and it leaves a record, which is the point.
   requireTicketOwner(interaction, ticket) {
-    if (this.isAdmin(interaction)) return
     if (!ticket.claimant_discord_user_id) throw new Error('Claim the ticket first. Actions on a player belong to whoever is handling them.')
-    if (ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only the assigned staff member or an administrator can act on this player.')
+    if (ticket.claimant_discord_user_id !== interaction.user.id) {
+      throw new Error('Only the staff member handling this ticket can act on the player. '
+        + 'An administrator can reassign it first with `/ticket reassign`.')
+    }
+  }
+
+  // The administration side of the same line: closing, reopening and reassigning are things done
+  // to the ticket, and an administrator may do them to any of them.
+  requireAdminOrClaimant(interaction, ticket, what) {
+    if (this.isAdmin(interaction)) return
+    if (ticket.claimant_discord_user_id !== interaction.user.id) {
+      throw new Error(`Only an administrator or the assigned staff member can ${what}.`)
+    }
   }
 
   async runGmAction(interaction, ticket, key, context = {}) {
@@ -1878,6 +1918,9 @@ export class HeimdallService {
     if (wasOffline) await this.setIdentityHeld(ticket.realm_tag, ticket.id, staff.gm_name, true, interaction.user.id)
 
     const chunks = splitWowMessage(body)
+    // Ties every chunk of this reply back to the one message that shows it in the channel, so a
+    // delivery that dies an hour later can find that message and correct its marker.
+    const turnKey = interaction.id
     for (const [index, text] of chunks.entries()) {
       await this.repository.enqueue({
         ticketId: ticket.id,
@@ -1885,7 +1928,8 @@ export class HeimdallService {
         kind: 'virtual_whisper',
         // Contract the game module reads. gmName must be a configured, currently-held identity
         // and playerName an online character, or the module leaves the job queued untouched.
-        payload: { gmName: staff.gm_name, playerName: ticket.player_name, text },
+        // turnKey is inert to the module; it reads the three fields it knows.
+        payload: { gmName: staff.gm_name, playerName: ticket.player_name, text, turnKey },
         uniqueParts: ['whisper', interaction.id, index],
       })
     }
@@ -1896,7 +1940,7 @@ export class HeimdallService {
     // the identity that spoke them, beside the player's own.
     const channel = this.ticketChannelFrom(interaction) ?? interaction.channel
     const context = await this.repository.playerContext(ticket.id).catch(() => null)
-    await this.postGmTurn({ ticket, channel, gmName: staff.gm_name, body, online: Boolean(context?.online) })
+    await this.postGmTurn({ ticket, channel, gmName: staff.gm_name, body, online: Boolean(context?.online), turnKey })
 
     // An implicit login just changed the identity state the header reports.
     if (wasOffline) await this.refreshTicketHeader(channel, ticket)
@@ -1921,23 +1965,71 @@ export class HeimdallService {
   // reports the player's online state from the last context snapshot - which can be up to one
   // sweep old - and never claims a bare "delivered". A whisper that is genuinely lost surfaces
   // separately, as a dead letter in this same channel.
-  async postGmTurn({ ticket, channel, gmName, body, online }) {
-    if (!channel) return null
-    const marker = online
+  gmTurnMarker(ticket, online) {
+    return online
       ? `-# sent — ${ticket.player_name} was online`
       : `-# queued — waits until ${ticket.player_name} logs in`
-    const content = `${body}\n${marker}`
+  }
+
+  gmTurnSettingKey(turnKey) {
+    return `discord.gm_turn.${turnKey}`
+  }
+
+  async postGmTurn({ ticket, channel, gmName, body, online, turnKey = null }) {
+    if (!channel) return null
+    const content = `${body}\n${this.gmTurnMarker(ticket, online)}`
+    const plain = `**${gmName}** (in game): ${content}`
+    let posted = null
+    let viaWebhook = false
+
     if (RESERVED_USERNAME_WORDS.test(gmName)) {
-      return channel.send({ content: `**${gmName}** (in game): ${content}`, allowedMentions: ALLOWED_MENTIONS })
-        .catch((error) => this.logger.warn('Could not post the GM turn to the channel', error))
+      posted = await channel.send({ content: plain, allowedMentions: ALLOWED_MENTIONS })
+        .catch((error) => { this.logger.warn('Could not post the GM turn to the channel', error); return null })
+    } else {
+      try {
+        const webhook = await this.ticketWebhook(channel)
+        posted = await webhook.send({ username: gmName, content, allowedMentions: ALLOWED_MENTIONS })
+        viaWebhook = true
+      } catch (error) {
+        this.logger.warn(`Webhook post failed for ${gmName}; falling back to a plain message.`, error?.message ?? error)
+        posted = await channel.send({ content: plain, allowedMentions: ALLOWED_MENTIONS })
+          .catch((sendError) => { this.logger.warn('Could not post the GM turn to the channel', sendError); return null })
+      }
     }
+
+    // Remembered in the settings table, not in memory. The delivery this marker describes can
+    // fail for eighty minutes before it is given up on, and a bot restarted in the meantime would
+    // otherwise have no way back to the message it needs to correct.
+    if (posted?.id && turnKey) {
+      await this.repository.setSetting(this.gmTurnSettingKey(turnKey),
+        JSON.stringify({ channelId: channel.id, messageId: posted.id, viaWebhook, gmName, body, playerName: ticket.player_name })).catch(() => null)
+    }
+    return posted
+  }
+
+  // A whisper Heimdall has given up on. The turn is still sitting in the channel claiming it was
+  // sent, which is the one thing that must not be left standing.
+  async markGmTurnFailed(turnKey) {
+    if (!turnKey) return false
+    const raw = await this.repository.getSetting(this.gmTurnSettingKey(turnKey)).catch(() => null)
+    if (!raw) return false
+    let saved
+    try { saved = JSON.parse(raw) } catch { return false }
+    const channel = await this.client.channels.fetch(saved.channelId).catch(() => null)
+    if (!channel) return false
+    const content = `${saved.body}\n-# **failed — this never reached ${saved.playerName ?? 'the player'}. See the notice below.**`
     try {
-      const webhook = await this.ticketWebhook(channel)
-      return await webhook.send({ username: gmName, content, allowedMentions: ALLOWED_MENTIONS })
+      if (saved.viaWebhook) {
+        const webhook = await this.ticketWebhook(channel)
+        await webhook.editMessage(saved.messageId, { content })
+      } else {
+        const message = await channel.messages.fetch(saved.messageId)
+        await message.edit({ content: `**${saved.gmName}** (in game): ${content}` })
+      }
+      return true
     } catch (error) {
-      this.logger.warn(`Webhook post failed for ${gmName}; falling back to a plain message.`, error?.message ?? error)
-      return channel.send({ content: `**${gmName}** (in game): ${content}`, allowedMentions: ALLOWED_MENTIONS })
-        .catch((sendError) => this.logger.warn('Could not post the GM turn to the channel', sendError))
+      this.logger.warn('Could not mark a GM turn as failed; the dead-letter notice still stands.', error?.message ?? error)
+      return false
     }
   }
 
@@ -2021,7 +2113,7 @@ export class HeimdallService {
   }
 
   async closeTicket(interaction, ticket, note) {
-    if (!this.isAdmin(interaction) && ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only an administrator or the assigned staff member can close this ticket.')
+    this.requireAdminOrClaimant(interaction, ticket, 'close this ticket')
     const ack = await this.beginSilent(interaction)
     const closer = await this.staffDisplayName(interaction.user.id)
     await this.performClose({
@@ -2140,7 +2232,8 @@ export class HeimdallService {
     await this.cacheOverwriteTargets(ticket)
     await this.withFreshCategories(`Moving ${ticket.public_key} to its category`,
       () => channel.setParent(this.categoryFor(ticket), { lockPermissions: false }))
-    await channel.permissionOverwrites.set(this.overwrites(ticket), `Ticket ${ticket.public_key} visibility updated`)
+    const grants = await this.repository.ticketGrants(ticket.id).catch(() => [])
+    await channel.permissionOverwrites.set(this.overwrites(ticket, grants), `Ticket ${ticket.public_key} visibility updated`)
     await this.refreshTicketHeader(channel, ticket)
   }
 
@@ -2321,6 +2414,25 @@ ${chunk}\`\`\``,
     }
   }
 
+  // The module has written a new player snapshot and says so. Only the header changes - the
+  // ticket's category and permissions are functions of its lifecycle, and none of that moved -
+  // so this deliberately does not go through refreshVisibility.
+  //
+  // The second guard against redraw churn, after the module's own: even a row that was queued
+  // costs nothing if the header would come out identical. The module's guard stops the queue
+  // filling up; this one stops Discord being edited for a snapshot whose visible fields are the
+  // same, which is the case every time a forced refresh finds nothing new.
+  async redrawFromContext(payload) {
+    if (!payload?.realmTag) throw new Error('Context update payload is missing realmTag.')
+    const ticket = await this.repository.getIngameTicket(payload.realmTag, payload.sourceTicketId)
+    if (!ticket) throw new Error(`No local in-game ticket record for ${payload.realmTag}-${payload.sourceTicketId}.`)
+    if (!ticket.discord_channel_id) return
+    if (ticket.status === 'closed' || ticket.status === 'cancelled') return
+    const channel = await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null)
+    if (!channel) return
+    await this.refreshTicketHeader(channel, ticket)
+  }
+
   async syncIngameTicket(payload) {
     if (!payload.realmTag) throw new Error('In-game sync payload is missing realmTag; it predates realm-tagged tickets.')
     const ticket = await this.repository.getIngameTicket(payload.realmTag, payload.sourceTicketId)
@@ -2413,6 +2525,10 @@ ${chunk}\`\`\``,
     const early = !dead && Number(outcome?.attempts) === DELIVERY_EARLY_WARNING_ATTEMPTS
     if (!dead && !early) return
 
+    // A GM's turn is in the channel saying it was sent. If the whisper behind it has been given
+    // up on, that line is now false and gets corrected before the notice below is posted.
+    if (dead && job.kind === 'virtual_whisper') await this.markGmTurnFailed(job.payload?.turnKey)
+
     const { channel, key } = await this.deliveryAudience(job)
     if (!channel) return
     const what = DELIVERY_ACTIONS[job.kind] ?? `carry out ${job.kind}`
@@ -2459,6 +2575,7 @@ Last error: \`${reason}\``
         if (job.direction === 'to_discord' && job.kind === 'gm_command_audit') await this.postCommandAudit(job.payload)
         else if (job.direction === 'to_discord' && job.kind === 'player_whisper') await this.postPlayerWhisper(job.payload)
         else if (job.direction === 'to_discord' && job.kind === 'sync_ingame_ticket') await this.syncIngameTicket(job.payload)
+        else if (job.direction === 'to_discord' && job.kind === 'context_updated') await this.redrawFromContext(job.payload)
         else if (job.direction === 'to_discord' && job.kind === 'create_discord_ticket') {
           const ticket = await this.repository.getTicket(job.ticket_id)
           if (!ticket) throw new Error('Ticket no longer exists.')
@@ -2515,6 +2632,36 @@ Last error: \`${reason}\``
       return interaction.reply({ content: rows.length ? rows.map((row) => `<@${row.discord_user_id}> → ${row.gm_name}${row.enabled ? '' : ' (disabled)'}`).join('\n') : 'No staff mappings are configured.', flags: MessageFlags.Ephemeral, allowedMentions: { users: rows.map((row) => row.discord_user_id), roles: [], repliedUser: false } })
     }
     const ticketId = interaction.options.getInteger('ticket_id', true)
+    // Access to a closed ticket without reopening it. Reopening was the only way to let a GM read
+    // a ticket they had not handled, and it is far too big a lever: it clears the claim, puts the
+    // ticket back in the pool and restarts the whole lifecycle, just so somebody could read.
+    if (command === 'grant') {
+      const user = interaction.options.getUser('user', true)
+      const ticket = await this.repository.getTicket(ticketId)
+      if (!ticket) throw new Error(`There is no ticket ${ticketId}.`)
+      if (ticket.status !== 'closed' && ticket.status !== 'cancelled') {
+        throw new Error(`${ticket.public_key} is still open. Grants are for closed tickets; `
+          + 'a live one can be reassigned with `/ticket reassign` instead.')
+      }
+      if (!ticket.discord_channel_id) throw new Error(`${ticket.public_key} has no channel left to give access to.`)
+      const mapping = await this.repository.staff(user.id)
+      if (!mapping) throw new Error('That user has no enabled staff mapping, so there is nothing to grant them.')
+      const channel = await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null)
+      if (!channel) throw new Error(`${ticket.public_key}'s channel has already been deleted by the retention sweep.`)
+
+      const grants = await this.repository.addTicketGrant(ticket.id, user.id)
+      await this.guild.members.fetch(user.id).catch(() => null)
+      await channel.permissionOverwrites.set(this.overwrites(ticket, grants),
+        `${ticket.public_key} granted to ${user.id} by ${interaction.user.id}`)
+      await this.repository.audit(ticket.id, 'ticket_granted', interaction.user.id, { to: user.id })
+      this.logger.info('Closed ticket granted', { ticket: ticket.public_key, to: user.id, by: interaction.user.id })
+      return interaction.reply({
+        content: `${user} can now read ${ticket.public_key} without it being reopened. `
+          + 'The access ends when the channel is deleted by the retention sweep.',
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { users: [user.id], roles: [], repliedUser: false },
+      })
+    }
     if (command === 'reopen') {
       const ticket = await this.repository.reopen(ticketId, interaction.user.id)
       const channel = ticket.discord_channel_id && await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null)
@@ -2636,6 +2783,9 @@ export function ticketAdminCommand() {
     .addSubcommand((subcommand) => subcommand.setName('reopen').setDescription('Reopen a closed ticket')
       .addIntegerOption((option) => option.setName('ticket_id').setDescription('Internal ticket number').setRequired(true).setMinValue(1)))
     .addSubcommand((subcommand) => subcommand.setName('reassign').setDescription('Assign a ticket to rostered staff')
+      .addIntegerOption((option) => option.setName('ticket_id').setDescription('Internal ticket number').setRequired(true).setMinValue(1))
+      .addUserOption((option) => option.setName('user').setDescription('Rostered staff member').setRequired(true)))
+    .addSubcommand((subcommand) => subcommand.setName('grant').setDescription('Let a staff member read a closed ticket, without reopening it')
       .addIntegerOption((option) => option.setName('ticket_id').setDescription('Internal ticket number').setRequired(true).setMinValue(1))
       .addUserOption((option) => option.setName('user').setDescription('Rostered staff member').setRequired(true)))
 }
