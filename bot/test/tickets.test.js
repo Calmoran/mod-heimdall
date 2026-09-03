@@ -2323,3 +2323,60 @@ test('a work thread that cannot be created never costs the action that needed it
   const surface = await service.workSurface(channel, { id: 7, public_key: 'R1-7', source: 'ingame' })
   assert.equal(surface, channel, 'a note would have been lost because a thread could not be made')
 })
+
+// ------------------------------------------------------- T12: two defects found in self-review
+
+// The byte-identical skip compared only text. The identity toggle's label is the opposite of what
+// pressing it does when it goes stale, and the disabled state of Reply to Player is the difference
+// between a usable control and one that refuses - neither is text, and both would have been
+// skipped as "nothing changed".
+test('a redraw that changes only a control is not skipped as identical', async () => {
+  const message = v2Message('m-7', '### Ticket R1-7')
+  message.components.push({ type: 1, components: [{ type: 2, custom_id: 'ticket:identity-toggle:7', label: 'Log In To Game', disabled: false }] })
+  message.edit = async () => { message.edited = true }
+  const { service, surface } = resolveService({ storedId: 'm-7', messages: [message] })
+
+  const sameTextNewLabel = {
+    components: [
+      { type: 17, components: [{ type: 10, content: '### Ticket R1-7\nsomething' }] },
+      { type: 1, components: [{ type: 2, custom_id: 'ticket:identity-toggle:7', label: 'Log Out Of Game', disabled: false }] },
+    ],
+  }
+  await service.redrawHeader(surface, { id: 7, public_key: 'R1-7' }, 'staff', sameTextNewLabel)
+  assert.equal(message.edited, true, 'the toggle kept a label that is the opposite of what it does')
+})
+
+test('a redraw identical in both text and controls is still skipped', async () => {
+  const message = v2Message('m-8', '### Ticket R1-7')
+  message.components.push({ type: 1, components: [{ type: 2, custom_id: 'ticket:claim:7', label: 'Claim', disabled: false }] })
+  message.edit = async () => { message.edited = true }
+  const { service, surface } = resolveService({ storedId: 'm-8', messages: [message] })
+
+  await service.redrawHeader(surface, { id: 7, public_key: 'R1-7' }, 'staff', {
+    components: [
+      { type: 17, components: [{ type: 10, content: '### Ticket R1-7\nsomething' }] },
+      { type: 1, components: [{ type: 2, custom_id: 'ticket:claim:7', label: 'Claim', disabled: false }] },
+    ],
+  })
+  assert.equal(message.edited, undefined, 'an unchanged header was still sent to Discord')
+})
+
+// "Is there a header already" and "is there a header I can use" are different questions after the
+// upgrade. Answering the first with the second put a new V2 header in the channel BESIDE the
+// surviving 1.x embed - two headers on every open ticket that resynced before it next changed
+// state, one of them frozen and wrong.
+test('a resync during the upgrade replaces the 1.x header instead of posting beside it', async () => {
+  // headerService's bot is 'bot-user'; a mismatch here silently makes the legacy header invisible.
+  const legacy = { id: 'old', author: { id: 'bot-user' }, embeds: [{ title: 'R1-5' }], components: [], delete: async () => { legacy.deleted = true } }
+  const { service, sent, ticket, channel, headerIds } = headerService({ source: 'ingame' })
+  channel.messages.fetch = async (arg) => (typeof arg === 'string'
+    ? Promise.reject(new Error('Unknown Message'))
+    : { find: (predicate) => [legacy].find(predicate) ?? null })
+
+  await service.postTicketHeader(channel, ticket, 'help')
+
+  assert.equal(sent.channel.filter((payload) => v2ActionRows(payload).length).length, 1,
+    'the upgrade left two headers in the channel')
+  assert.equal(legacy.deleted, true, 'the 1.x header was left sitting above its replacement')
+  assert.ok(headerIds.get('5:staff'), 'the replacement was posted without remembering its id')
+})

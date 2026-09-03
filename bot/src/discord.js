@@ -1177,6 +1177,28 @@ export class HeimdallService {
     return this.componentText(message.components)
   }
 
+  // What "has this header actually changed" compares. Text alone is not enough: the identity
+  // toggle's label and the disabled state of Reply to Player are part of what the header says, and
+  // a redraw that changed only a button would be skipped as identical - leaving a control whose
+  // label is the opposite of what pressing it does.
+  //
+  // Deliberately not a whole-payload diff. A message read back from Discord carries fields an
+  // outgoing builder does not, so a structural comparison would never match and the guard would
+  // never fire at all.
+  headerSignature(components) {
+    const controls = []
+    const walk = (items) => {
+      for (const raw of items ?? []) {
+        const item = typeof raw?.toJSON === 'function' ? raw.toJSON() : raw
+        const id = item?.custom_id ?? item?.customId ?? item?.data?.custom_id
+        if (id) controls.push(`${id}|${item.label ?? item.data?.label ?? ''}|${item.disabled ?? item.data?.disabled ?? false}`)
+        if (Array.isArray(item?.components)) walk(item.components)
+      }
+    }
+    walk(components)
+    return `${this.componentText(components)} ${controls.join('')}`
+  }
+
   // Stored id first, marker scan second, nothing third. The scan is recovery, not the mechanism:
   // it covers a lost setting and it covers the upgrade, where every open ticket still carries a
   // 1.x embed header that was never given an id.
@@ -1214,6 +1236,22 @@ export class HeimdallService {
     return legacy ? null : message
   }
 
+  // Posts a header only where there is none, and replaces a 1.x one where there is.
+  //
+  // "Is there a header already" and "is there a header I can use" are not the same question after
+  // the upgrade, and answering the first with the second put a V2 header in the channel BESIDE the
+  // surviving embed - two headers, one of them frozen and wrong, on every open ticket that
+  // resynced before it next changed state.
+  async ensureHeader(surface, ticket, which, payload, { onCreate = null } = {}) {
+    const { message, legacy } = await this.resolveHeader(surface, ticket, which)
+    if (message && !legacy) return message
+    if (legacy) return this.redrawHeader(surface, ticket, which, payload)
+    const posted = await surface.send(payload)
+    await this.repository.setHeaderId(ticket.id, posted.id, which)
+    if (onCreate) await onCreate()
+    return posted
+  }
+
   async postTicketHeader(channel, ticket, description = '') {
     const surface = await this.staffSurface(channel, ticket)
     const body = description || await this.repository.ticketBody(ticket).catch(() => null) || ''
@@ -1222,24 +1260,15 @@ export class HeimdallService {
     // controls. There is no player in the room to hide anything from and no second surface to
     // drift out of step.
     if (surface === channel) {
-      if (!await this.findHeaderMessage(channel, ticket)) {
-        const posted = await channel.send(await this.headerMessage(ticket, body))
-        await this.repository.setHeaderId(ticket.id, posted.id, 'staff')
-        await this.warnChannelIfRosterEmpty(channel, ticket)
-      }
+      await this.ensureHeader(channel, ticket, 'staff', await this.headerMessage(ticket, body),
+        { onCreate: () => this.warnChannelIfRosterEmpty(channel, ticket) })
       return channel
     }
 
     // Discord-originated (and legacy threaded) tickets: the reporter can read the channel, so the
     // channel gets the player-safe header and everything staff-facing stays in the private thread.
-    if (!await this.findHeaderMessage(channel, ticket, 'player')) {
-      const posted = await channel.send(this.playerHeaderMessage(ticket, body))
-      await this.repository.setHeaderId(ticket.id, posted.id, 'player')
-    }
-    if (!await this.findHeaderMessage(surface, ticket)) {
-      const posted = await surface.send(await this.headerMessage(ticket, body))
-      await this.repository.setHeaderId(ticket.id, posted.id, 'staff')
-    }
+    await this.ensureHeader(channel, ticket, 'player', this.playerHeaderMessage(ticket, body))
+    await this.ensureHeader(surface, ticket, 'staff', await this.headerMessage(ticket, body))
     return surface
   }
 
@@ -1271,7 +1300,7 @@ export class HeimdallService {
       // The second guard against redraw churn. The module already declines to queue a context
       // update when nothing meaningful changed; this declines to spend a Discord edit when the
       // header would come out the same anyway, whatever asked for the redraw.
-      if (this.componentText(payload.components) === this.messageText(message)) return message
+      if (this.headerSignature(payload.components) === this.headerSignature(message.components)) return message
       await message.edit(payload)
       return message
     }
