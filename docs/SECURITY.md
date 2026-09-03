@@ -47,3 +47,47 @@
 If a secret is exposed, revoke/rotate it immediately, invalidate active bot
 sessions by changing the token, update the environment file, and restart only
 the bot after verifying the replacement.
+
+## Fixed findings
+
+### 2.0.0 — a command's target came from the request, not from the ticket
+
+**Reported by @AbyssalJake, 2026-09-03**, reading the delivery path on a TrinityCore server.
+
+**What it was.** Heimdall's bot cannot send command text; it writes a row asking for one of a fixed
+list of actions, and the module composes and runs the command inside the worldserver. The *action*
+was constrained by that list. The *target* was not: the character name, the in-game ticket number
+and the ticket's key were read out of the request's own JSON. The module trusted them because in
+practice only the bot writes those rows, and the bot fills them from the ticket.
+
+**What it meant.** Anything able to write to Heimdall's database — a compromised bot, or its
+database account — could attach an allowlisted action to a ticket it was entitled to and aim it at
+any character on the realm. It was never arbitrary command execution: the list is fixed, and a row
+still could not express a command that is not on it. But "revive, unstuck, combat stop, teleport or
+kick, against whoever the row names" is a far wider reach than "against the player whose ticket
+this is", and the same was true of the identity's whispers.
+
+Reviewing the same code found the command path was looser than reported: it did not join the ticket
+table at all, so a hand-written row needed no real ticket behind it, and not one belonging to the
+realm that would run the command.
+
+**The rule now.** *The module resolves the target from its own ticket row. The request can say only
+what to do, never to whom.* The character, the in-game ticket number and the ticket's key all come
+from `heimdall_ticket`; the request contributes the action, a teleport destination, the message
+text, and the GM identity's name. A command row that does not resolve to a ticket on this realm is
+refused and marked dead with a reason, rather than performed or left queued unexplained. Replies
+are whispered to the ticket's character resolved by GUID, so a ticket with no character behind it —
+any ticket opened in Discord — is refused rather than aimed at a name.
+
+The GM identity's name is still supplied by the request, and that is deliberate rather than an
+oversight: the module only ever acts for characters you listed in `Heimdall.GmIdentities`, so a
+name that is not on your list resolves to no held identity and nothing happens. It is gated by your
+consent, in your own config file.
+
+Names read back out of the database are still validated before they reach a command, because the
+database is not a trusted source of command text either — a stored name containing a space would
+otherwise become a second argument.
+
+**If you run 1.x**, this is fixed in 2.0.0 and there is no configuration change to make. The
+exposure required write access to Heimdall's database, which is also the point at which someone
+could alter tickets directly.

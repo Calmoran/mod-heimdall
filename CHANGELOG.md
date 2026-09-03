@@ -80,6 +80,17 @@ Nothing here needs configuring. It is written down because your staff will notic
   and never moves anything already posted. Discord-opened tickets keep their private staff thread
   under both settings - their reporter can read the channel.
 
+### Security
+
+- **The module takes the target of every realm command from its own ticket row, never from the
+  request.** A delivery row used to supply the character name, the in-game ticket number and the
+  ticket's key, so anything able to write to Heimdall's database could attach one of the allowed
+  actions to a real ticket and aim it at any character on the realm. The action list was always
+  fixed and still is - this was never arbitrary command execution - but the target is now resolved
+  from `heimdall_ticket`, a command row that does not resolve to a ticket on this realm is refused,
+  and replies are whispered to the ticket's character by GUID. Reported by **@AbyssalJake**; the
+  full account is under "Fixed findings" in `docs/SECURITY.md`.
+
 ### Changed
 
 - **Heimdall has a database of its own.** The seven `heimdall_*` tables now live in a database
