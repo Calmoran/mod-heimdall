@@ -682,8 +682,11 @@ void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, ui
     std::ostringstream rawDeliveryKey;
     rawDeliveryKey << "ingame:" << realmTag << ':' << sourceTicketId << ":context-updated:" << capturedAt;
 
+    // INSERT IGNORE, like the two other delivery inserts in this file, rather than an upsert: the
+    // SELECT joins two tables that both carry a ticket_id, so the no-op assignment an upsert needs
+    // is ambiguous and MySQL refuses the whole statement (ERROR 1052). Found by running it.
     CharacterDatabase.Execute(
-        Q("INSERT INTO heimdall_delivery "
+        Q("INSERT IGNORE INTO heimdall_delivery "
         "(ticket_id, delivery_key, direction, kind, payload_json) "
         "SELECT t.id, SHA2('{}', 256), 'to_discord', 'context_updated', "
         "JSON_OBJECT('realmTag', '{}', 'sourceTicketId', {}) "
@@ -694,8 +697,7 @@ void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, ui
         "OR JSON_EXTRACT(e.payload_json, '$.online') <> {} "
         "OR JSON_EXTRACT(e.payload_json, '$.zoneId') <> {} "
         "OR JSON_EXTRACT(e.payload_json, '$.level') <> {} "
-        "OR JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.name')) <> '{}') "
-        "ON DUPLICATE KEY UPDATE ticket_id = ticket_id"),
+        "OR JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.name')) <> '{}')"),
         Escape(rawDeliveryKey.str()), escapedRealmTag, sourceTicketId, escapedRealmTag, sourceTicketId,
         forced ? 1 : 0, online ? 1 : 0, zoneId, level, Escape(cache->Name));
 
