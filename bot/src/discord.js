@@ -1697,7 +1697,9 @@ export class HeimdallService {
         ticketId: ticket.id,
         direction: 'to_game',
         kind: 'refresh_player_context',
-        payload: { realmTag: ticket.realm_tag, sourceTicketId: ticket.source_ticket_id },
+        // realmTag stays: it is how the module's poll finds its own rows. The ticket number it
+        // publishes against comes from the joined ticket, not from here.
+        payload: { realmTag: ticket.realm_tag },
         uniqueParts: ['refresh-context', interaction.id],
       })
       // The old text said to press Refresh again to redraw the card. That was never true - nothing
@@ -1844,11 +1846,11 @@ export class HeimdallService {
       ticketId: ticket.id,
       realmTag: ticket.realm_tag,
       kind: 'gm_action',
+      // Only WHAT to do. The module resolves the target character and the ticket's key from its
+      // own heimdall_ticket row - a payload cannot aim an action at somebody else's character.
       payload: {
         action: key,
-        playerName: name,
         destination: context.destination ?? null,
-        publicKey: ticket.public_key,
       },
       causedBy: interaction.user.id,
       uniqueParts: [key, name, context.destination ?? '', Date.now()],
@@ -1970,7 +1972,8 @@ export class HeimdallService {
         ticketId: claimed.id,
         realmTag: claimed.realm_tag,
         kind: 'assign_ticket',
-        payload: { sourceTicketId: claimed.source_ticket_id, gmName },
+        // gmName only: the in-game ticket number comes from the module's own row.
+        payload: { gmName },
         causedBy: interaction.user.id,
         uniqueParts: ['assign', claimed.version],
       })
@@ -2004,10 +2007,13 @@ export class HeimdallService {
         ticketId: ticket.id,
         direction: 'to_game',
         kind: 'virtual_whisper',
-        // Contract the game module reads. gmName must be a configured, currently-held identity
-        // and playerName an online character, or the module leaves the job queued untouched.
-        // turnKey is inert to the module; it reads the three fields it knows.
-        payload: { gmName: staff.gm_name, playerName: ticket.player_name, text, turnKey },
+        // Contract the game module reads. gmName must be a configured, currently-held identity,
+        // or the module leaves the job queued untouched.
+        //
+        // No player name: the module whispers whoever its own ticket row names, resolved by GUID.
+        // Offering one here would be offering it something it must not act on. turnKey is inert to
+        // the module; it is how the bot finds this reply's message if delivery is given up on.
+        payload: { gmName: staff.gm_name, text, turnKey },
         uniqueParts: ['whisper', interaction.id, index],
       })
     }
@@ -2222,7 +2228,8 @@ export class HeimdallService {
         ticketId: closed.id,
         realmTag: closed.realm_tag,
         kind: 'close_ticket',
-        payload: { sourceTicketId: closed.source_ticket_id },
+        // Nothing to say but which ticket, and the module knows that from ticket_id.
+        payload: {},
         causedBy: actorId,
         uniqueParts: ['close', idempotencyKey],
       })

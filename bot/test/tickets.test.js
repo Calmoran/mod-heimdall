@@ -1658,9 +1658,16 @@ test('a GM action becomes an intent row carrying fields, not a command', async (
   assert.ok(job, 'the GM action never reached the queue')
   assert.equal(job.direction, 'soap')
   assert.equal(job.payload.action, 'revive')
-  assert.equal(job.payload.playerName, 'Bob')
   assert.equal(job.payload.causedBy, '100', 'the Discord user who pressed the button was not recorded')
   assert.equal(job.payload.realmTag, 'R1')
+
+  // T13: the row says WHAT to do and never to whom. The module resolves the target from its own
+  // heimdall_ticket row, so a name here is an input it must not act on - and the bot should not be
+  // offering one. `Bob` is this ticket's player; the payload must still not name him.
+  assert.equal(job.payload.playerName, undefined, 'the payload still names the target')
+  assert.equal(job.payload.publicKey, undefined, 'the payload still carries the ticket key')
+  assert.equal(job.payload.sourceTicketId, undefined, 'the payload still carries the in-game ticket number')
+  assert.ok(!JSON.stringify(job.payload).includes('Bob'), 'the target leaked into the payload somewhere')
 
   // The whole design in one assertion: no field of this row is a command.
   for (const [field, value] of Object.entries(job.payload)) {
@@ -2599,4 +2606,77 @@ test('a layout change is noticed even when every word and button is identical', 
     'this test is pointless unless the two really do say the same thing')
   assert.notEqual(service.headerSignature(oneBlock), service.headerSignature(twoBlocks),
     'a relayout compares equal to what is posted, so no existing card would ever be redrawn')
+})
+
+// ------------------------------------- T13: the bot stops offering the module a target to trust
+//
+// Reported 2026-09-03 by a TrinityCore server operator reading the delivery path. The module used
+// to take the target character, the in-game ticket number and the ticket's key out of the delivery
+// payload, so anything able to write those rows could hang an allowlisted action off a real ticket
+// and aim it at any character. The module now resolves all three from its own heimdall_ticket row.
+//
+// These are the bot half: once the module ignores those fields, the bot must stop writing them.
+// A payload that still carried them would be a standing invitation to start trusting them again.
+
+test('no command row the bot writes names a target, a ticket number or a ticket key', async () => {
+  const source = fs.readFileSync(new URL('../src/discord.js', import.meta.url), 'utf8')
+  // Every payload literal the bot composes for the realm, taken from the source rather than from a
+  // list here, so a new command kind cannot quietly reintroduce the field.
+  const queued = source.slice(source.indexOf('async queueGameCommand('))
+  assert.ok(queued.length > 0, 'queueGameCommand has moved; this test needs updating')
+
+  for (const forbidden of ['playerName:', 'publicKey:', 'sourceTicketId:']) {
+    const soapPayloads = [...source.matchAll(/kind: (?:'(?:assign_ticket|close_ticket|gm_action|virtual_whisper)'|held \?[^,]+),\s*(?:\/\/[^\n]*\n\s*)*payload: \{([^}]*)\}/g)]
+    assert.ok(soapPayloads.length >= 4, `expected the four realm-bound payloads, found ${soapPayloads.length}`)
+    for (const match of soapPayloads) {
+      assert.ok(!match[1].includes(forbidden),
+        `a realm-bound payload still carries ${forbidden} — the module must resolve that from its own ticket row`)
+    }
+  }
+})
+
+test('claiming sends the GM name and nothing that identifies the ticket', async () => {
+  const { service, seen } = commandChannelService()
+  service.requireRosteredStaff = async () => ({ gm_name: 'Helpbot' })
+  service.canonicalGmNameForCommand = async (name) => name
+  service.refreshVisibility = async () => {}
+  service.beginSilent = async () => ({ silent: true })
+  service.endSilent = async () => {}
+  service.repository.claim = async () => ({
+    id: 7, source: 'ingame', realm_tag: 'R1', source_ticket_id: 42, version: 1, public_key: 'R1-7',
+  })
+
+  await service.claim({ user: { id: '100' }, channel: null }, { id: 7 })
+  const job = seen.enqueued.find((row) => row.kind === 'assign_ticket')
+  assert.ok(job, 'the claim never reached the realm queue')
+  assert.equal(job.payload.gmName, 'Helpbot')
+  assert.equal(job.payload.sourceTicketId, undefined,
+    'the in-game ticket number is the module\'s to read from its own row')
+})
+
+test('a reply sends the GM identity and the words, never the recipient', async () => {
+  const { service, seen } = commandChannelService()
+  const ticket = {
+    id: 7, public_key: 'R1-7', source: 'ingame', realm_tag: 'R1',
+    player_name: 'Bob', claimant_discord_user_id: '100', claimant_gm_name: 'Helpbot',
+  }
+  service.requireRosteredStaff = async () => ({ gm_name: 'Helpbot' })
+  service.beginSilent = async () => ({ silent: true })
+  service.endSilent = async () => {}
+  service.identityState = async () => 'held'
+  service.postGmTurn = async () => {}
+  service.refreshTicketHeader = async () => {}
+  service.ticketChannelFrom = () => ({ id: 'chan-7' })
+  service.repository.recordMessage = async () => 'key'
+  service.repository.playerContext = async () => ({ online: 1 })
+
+  await service.replyToPlayer({ user: { id: '100' }, channel: { id: 'chan-7' }, id: 'i-1' }, ticket, 'please relog')
+
+  const whisper = seen.enqueued.find((row) => row.kind === 'virtual_whisper')
+  assert.ok(whisper, 'the reply never reached the realm queue')
+  assert.equal(whisper.payload.gmName, 'Helpbot')
+  assert.equal(whisper.payload.text, 'please relog')
+  assert.equal(whisper.payload.playerName, undefined,
+    'the module whispers whoever its ticket row names, resolved by GUID — the bot must not offer a name')
+  assert.ok(!JSON.stringify(whisper.payload).includes('Bob'), 'the recipient leaked into the payload')
 })

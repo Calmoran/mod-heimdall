@@ -21,6 +21,7 @@
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
 
+#include "mod_heimdall_command.h"
 #include "mod_heimdall_shared.h"
 
 #include <algorithm>
@@ -1161,10 +1162,12 @@ private:
             escapedRealmTag);
 
         // MySQL does the JSON parsing so the module needs no JSON dependency.
+        // t.player_guid was already selected here and already used for refresh_player_context, but
+        // the whisper target came from the payload's playerName - so this path had the right answer
+        // in hand and asked the untrusted one anyway. The payload no longer carries a name.
         QueryResult rows = CharacterDatabase.Query(
-            Q("SELECT d.id, d.ticket_id, d.kind, t.source_ticket_id, t.player_guid, "
+            Q("SELECT d.id, d.ticket_id, d.kind, t.source_ticket_id, t.player_guid, t.player_name, "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.gmName')), "
-            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.playerName')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.text')) "
             "FROM heimdall_delivery d "
             "JOIN heimdall_ticket t ON t.id = d.ticket_id "
@@ -1186,8 +1189,8 @@ private:
             std::string kind = fields[2].Get<std::string>();
             uint32 sourceTicketId = fields[3].Get<uint32>();
             uint64 rowPlayerGuid = fields[4].Get<uint64>();
-            std::string gmName = fields[5].Get<std::string>();
-            std::string targetName = fields[6].Get<std::string>();
+            std::string ticketPlayerName = fields[5].Get<std::string>();
+            std::string gmName = fields[6].Get<std::string>();
             std::string text = fields[7].Get<std::string>();
 
             if (blockedTickets.count(ticketId))
@@ -1205,8 +1208,21 @@ private:
                 continue;
             }
 
+            // A ticket opened in Discord has no character behind it, so there is nobody on the
+            // realm this could be whispered to. That is a permanent condition, not a player who
+            // happens to be offline, so it is refused with a reason rather than left to retry for
+            // eighty minutes and die as an unexplained dead letter.
+            if (!rowPlayerGuid)
+            {
+                FailGameCommand(deliveryId, kind, ticketId, fields[2].Get<uint32>() + 1,
+                    "This ticket has no character on the realm, so an in-game whisper cannot reach it.");
+                continue;
+            }
+
             Player* speaker = IdentityRegistry::instance()->GetHeldPlayer(gmName);
-            Player* target = normalizePlayerName(targetName) ? ObjectAccessor::FindPlayerByName(targetName, true) : nullptr;
+            // By GUID, not by name. The GUID is the module's own record of whose ticket this is;
+            // the name in the payload was whatever the row said.
+            Player* target = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(rowPlayerGuid));
 
             if (!speaker || !target || text.empty())
             {
@@ -1228,7 +1244,7 @@ private:
                 "leased_until = NULL WHERE id = {}"),
                 deliveryId);
 
-            LOG_INFO(LOG_FILTER, "Delivered ticket reply from \"{}\" to \"{}\" (delivery {}).", gmName, targetName, deliveryId);
+            LOG_INFO(LOG_FILTER, "Delivered ticket reply from \"{}\" to \"{}\" (delivery {}).", gmName, ticketPlayerName, deliveryId);
         } while (rows->NextRow());
     }
 
@@ -1256,20 +1272,32 @@ private:
             "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.realmTag')) = '{}'"),
             escapedRealmTag);
 
+        // The JOIN is the gate, not a convenience. Until now this query selected no ticket at all -
+        // d.ticket_id appeared only inside a COALESCE for error text - so a hand-written row needed
+        // no real ticket, not even one belonging to this realm, and the target came out of its own
+        // JSON. A row that does not resolve to a ticket of THIS realm now returns nothing here, and
+        // the sweep below dead-letters it so it cannot sit queued forever unexplained.
+        //
+        // The payload's realmTag check is kept as well, deliberately. It is redundant against
+        // t.realm_tag, and that is the point: the lease-recovery statement above has no ticket to
+        // join, so keeping both means the two statements agree about which rows are this realm's.
         QueryResult rows = CharacterDatabase.Query(
-            Q("SELECT d.id, d.kind, d.attempts, COALESCE(d.ticket_id, 0), "
+            Q("SELECT d.id, d.kind, d.attempts, d.ticket_id, "
+            "t.source_ticket_id, t.public_key, t.player_name, t.player_guid, "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.action')), "
-            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.sourceTicketId')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.gmName')), "
-            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.playerName')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.destination')), "
-            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.publicKey')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.causedBy')) "
             "FROM heimdall_delivery d "
+            "JOIN heimdall_ticket t ON t.id = d.ticket_id "
             "WHERE d.direction = 'soap' AND d.state = 'queued' AND d.available_at <= CURRENT_TIMESTAMP "
+            "AND t.realm_tag = '{}' "
             "AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.realmTag')) = '{}' "
             "ORDER BY d.id LIMIT 20"),
-            escapedRealmTag);
+            escapedRealmTag, escapedRealmTag);
+
+        RefuseUnattachedCommands(escapedRealmTag);
+
         if (!rows)
             return;
 
@@ -1284,13 +1312,21 @@ private:
             // put attempts = 0 into a dead letter that had really tried twelve times.
             uint32 attemptsAfter = fields[2].Get<uint32>() + 1;
             uint64 ticketId = fields[3].Get<uint64>();
-            std::string action = fields[4].Get<std::string>();
-            std::string sourceTicketId = fields[5].Get<std::string>();
-            std::string gmName = fields[6].Get<std::string>();
-            std::string playerName = fields[7].Get<std::string>();
-            std::string destination = fields[8].Get<std::string>();
-            std::string publicKey = fields[9].Get<std::string>();
-            std::string causedBy = fields[10].Get<std::string>();
+
+            // WHO, and WHICH TICKET, from the module's own row. Never from the payload.
+            Heimdall::Command::TicketTarget target;
+            target.sourceTicketId = fields[4].Get<uint32>();
+            target.publicKey = fields[5].Get<std::string>();
+            target.playerName = fields[6].Get<std::string>();
+            target.playerGuid = fields[7].Get<uint64>();
+
+            // WHAT to do, from the payload. gmName is here rather than in the ticket because it is
+            // gated by consent elsewhere: IdentityRegistry only acts for characters the operator
+            // listed in Heimdall.GmIdentities, so a forged name resolves to no held identity.
+            std::string action = fields[8].Get<std::string>();
+            std::string gmName = fields[9].Get<std::string>();
+            std::string destination = fields[10].Get<std::string>();
+            std::string causedBy = fields[11].Get<std::string>();
 
             // Lease before performing, so a crash mid-command leaves a recoverable row rather than
             // a command whose fate nobody knows.
@@ -1302,7 +1338,7 @@ private:
 
             std::string command;
             std::string refusal;
-            if (!ComposeGameCommand(kind, action, sourceTicketId, gmName, playerName, destination, publicKey, command, refusal))
+            if (!Heimdall::Command::Compose(kind, action, target, gmName, destination, command, refusal))
             {
                 FailGameCommand(deliveryId, kind, ticketId, attemptsAfter, refusal);
                 continue;
@@ -1334,109 +1370,33 @@ private:
         } while (rows->NextRow());
     }
 
-    // Builds the command text. Every argument is validated here, and an action this does not know
-    // is refused rather than passed on.
-    static bool ComposeGameCommand(std::string const& kind, std::string const& action,
-        std::string const& sourceTicketId, std::string const& gmName, std::string const& playerName,
-        std::string const& destination, std::string const& publicKey, std::string& command, std::string& refusal)
+    // Command composition and its validators live in mod_heimdall_command.h, which depends on the
+    // standard library alone so test/command_test.cpp can compile them outside the core's build.
+    // That header also holds the rule this path now follows: the payload says WHAT to do, the
+    // module's own ticket row says WHO it is done to.
+
+    // A queued command row claiming this realm that has no ticket of this realm behind it. Before
+    // the JOIN it would have been executed; after the JOIN, and without this, it would simply never
+    // be selected - queued forever, never run, never failed, never explained, which is a worse way
+    // to be secure. It is marked dead with a reason a human can act on.
+    //
+    // Deliberately matched on the payload's realmTag: a row with no ticket has nothing else to say
+    // whose realm it belongs to, and a row pointing at another realm's ticket is that realm's
+    // business to refuse, not ours to reach across and mark.
+    void RefuseUnattachedCommands(std::string const& escapedRealmTag)
     {
-        std::ostringstream out;
-
-        if (kind == "assign_ticket")
-        {
-            if (!IsTicketNumber(sourceTicketId) || !IsCharacterName(gmName))
-                return Refuse(refusal, "assign_ticket needs an in-game ticket number and a character name.");
-            out << ".ticket assign " << sourceTicketId << ' ' << gmName;
-        }
-        else if (kind == "close_ticket")
-        {
-            if (!IsTicketNumber(sourceTicketId))
-                return Refuse(refusal, "close_ticket needs an in-game ticket number.");
-            // ".ticket close", never ".ticket complete": complete sets only `completed` and leaves
-            // `type` at TICKET_TYPE_OPEN, which permanently blocks the player from opening another.
-            out << ".ticket close " << sourceTicketId;
-        }
-        else if (kind == "identity_login" || kind == "identity_logout")
-        {
-            if (!IsCharacterName(gmName))
-                return Refuse(refusal, "an identity command needs a character name.");
-            out << ".heimdall identity " << (kind == "identity_login" ? "login " : "logout ") << gmName;
-        }
-        else if (kind == "gm_action")
-        {
-            if (!IsCharacterName(playerName))
-                return Refuse(refusal, "a GM action needs a character name.");
-
-            if (action == "revive")
-                out << ".revive " << playerName;
-            else if (action == "unstuck")
-                out << ".unstuck " << playerName << " inn";
-            else if (action == "combatstop")
-                out << ".combatstop " << playerName;
-            else if (action == "kick")
-            {
-                if (!IsPublicKey(publicKey))
-                    return Refuse(refusal, "kick needs the ticket's key for its reason.");
-                // One token, not two: cs_misc.cpp declares the reason Optional<std::string_view>,
-                // and the parser refuses a command with anything left over.
-                out << ".kick " << playerName << " Ticket-" << publicKey;
-            }
-            else if (action == "teleport")
-            {
-                if (!IsTeleDestination(destination))
-                    return Refuse(refusal, "teleport needs one destination from the realm's teleport list.");
-                out << ".tele name " << playerName << ' ' << destination;
-            }
-            else
-                return Refuse(refusal, "\"" + action + "\" is not a GM action Heimdall performs.");
-        }
-        else
-            return Refuse(refusal, "\"" + kind + "\" is not a command Heimdall performs.");
-
-        command = out.str();
-        return true;
-    }
-
-    static bool Refuse(std::string& refusal, std::string reason)
-    {
-        refusal = std::move(reason);
-        return false;
-    }
-
-    // Digits only, and short enough that no composed command can be made unwieldy.
-    static bool IsTicketNumber(std::string const& value)
-    {
-        return !value.empty() && value.size() <= 10
-            && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
-    }
-
-    // A WoW character name: letters only, twelve at most - the client's own limit. This is what
-    // stops a name argument carrying a space and becoming a second command argument.
-    static bool IsCharacterName(std::string const& value)
-    {
-        return !value.empty() && value.size() <= 12
-            && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isalpha(c) != 0; });
-    }
-
-    static bool IsPublicKey(std::string const& value)
-    {
-        return !value.empty() && value.size() <= 32
-            && std::all_of(value.begin(), value.end(), [](unsigned char c)
-            {
-                return std::isalnum(c) != 0 || c == '-' || c == '_';
-            });
-    }
-
-    static bool IsTeleDestination(std::string const& value)
-    {
-        if (value == "$home")
-            return true;
-
-        return !value.empty() && value.size() <= 48
-            && std::all_of(value.begin(), value.end(), [](unsigned char c)
-            {
-                return std::isalnum(c) != 0 || c == '_' || c == '-';
-            });
+        CharacterDatabase.Execute(
+            Q("UPDATE heimdall_delivery d "
+            "LEFT JOIN heimdall_ticket t ON t.id = d.ticket_id AND t.realm_tag = '{}' "
+            "SET d.state = 'dead', d.attempts = d.attempts + 1, "
+            "d.last_error = 'Refused: this command row has no ticket on this realm behind it. "
+            "Heimdall takes the target of every command from its own ticket row, so a row without "
+            "one cannot be performed.' "
+            "WHERE d.direction = 'soap' AND d.state = 'queued' "
+            "AND d.available_at <= CURRENT_TIMESTAMP "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.realmTag')) = '{}' "
+            "AND t.id IS NULL"),
+            escapedRealmTag, escapedRealmTag);
     }
 
     // The markers the bot screened SOAP replies with, kept because the reply text is the same
