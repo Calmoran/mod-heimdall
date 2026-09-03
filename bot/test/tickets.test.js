@@ -2532,3 +2532,71 @@ test('no source file carries a control byte outside tab and newline', () => {
     }
   }
 })
+
+// ---------------------------------------------- T12c: the player context reads as four sections
+
+// Operator, on the first real card: running who-they-are, what-they-asked-before and what-staff-
+// know together as one block of text made the reader find the boundaries themselves.
+test('the player context is separate sections with a rule between each', async () => {
+  const { service, ticket } = v2HeaderService({ notes: 2, historyTotal: 3 })
+  const payload = await service.headerMessage(ticket, 'My bags are stuck.')
+  const [, contextBox] = payload.components.map((box) => box.toJSON())
+
+  const texts = contextBox.components.filter((child) => child.type === 10)
+  assert.equal(texts.length, 3, 'the context, the history and the notes should be three blocks')
+  assert.match(texts[0].content, /^### Player context/)
+  assert.match(texts[0].content, /level 70 Human Mage/)
+  assert.match(texts[1].content, /^\*\*History\*\*/)
+  assert.match(texts[2].content, /^\*\*Notes on this account\*\*/)
+
+  // A ruled separator after each block, including before the controls.
+  const rules = contextBox.components.filter((child) => child.type === 14)
+  assert.equal(rules.length, 3)
+  for (const rule of rules) assert.equal(rule.divider, true, 'a section boundary was left unruled')
+
+  // Order matters: text, rule, text, rule, text, rule, then the controls.
+  const order = contextBox.components.map((child) => child.type)
+  assert.deepEqual(order, [10, 14, 10, 14, 10, 14, 1, 1, 1])
+})
+
+test('a section with nothing in it contributes no empty block and no stray rule', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  service.config = { adminRoleIds: [], staffRoleIds: [] }
+  service.guild = { members: { cache: new Map() } }
+  service.repository = { ticketIntake: async () => null }
+  const ticket = { id: 8, public_key: 'DIS-000008', source: 'discord', status: 'open', opened_at: new Date() }
+
+  const payload = await service.headerMessage(ticket, 'my account is locked')
+  const [, contextBox] = payload.components.map((box) => box.toJSON())
+  const texts = contextBox.components.filter((child) => child.type === 10)
+  const rules = contextBox.components.filter((child) => child.type === 14)
+
+  // A Discord-native ticket has no player block, no history and no notes - just the heading and
+  // the controls, so exactly one section and one rule before the buttons.
+  assert.equal(texts.length, 1)
+  assert.equal(texts[0].content, '### Staff controls')
+  assert.equal(rules.length, 1)
+})
+
+test('sectioning the context does not push the header over either ceiling', async () => {
+  const { service, ticket } = v2HeaderService({ notes: 5, historyTotal: 40 })
+  const payload = await service.headerMessage(ticket, 'z'.repeat(6000))
+  assert.ok(v2Nodes(payload).length <= HEADER_COMPONENT_LIMIT,
+    `${v2Nodes(payload).length} components, over the limit of ${HEADER_COMPONENT_LIMIT}`)
+  assert.ok(v2Text(payload).length <= HEADER_TEXT_LIMIT)
+})
+
+// The guard compares what a header says and what its controls do. A change to how it is laid out
+// alters neither, so without the shape in the signature every card already posted would keep the
+// old layout until something unrelated happened to it.
+test('a layout change is noticed even when every word and button is identical', () => {
+  const service = Object.create(HeimdallService.prototype)
+  const oneBlock = [{ type: 17, components: [{ type: 10, content: 'a\nb' }] }]
+  const twoBlocks = [{ type: 17, components: [{ type: 10, content: 'a' }, { type: 14, divider: true }, { type: 10, content: 'b' }] }]
+
+  assert.equal(service.componentText(oneBlock), service.componentText(twoBlocks),
+    'this test is pointless unless the two really do say the same thing')
+  assert.notEqual(service.headerSignature(oneBlock), service.headerSignature(twoBlocks),
+    'a relayout compares equal to what is posted, so no existing card would ever be redrawn')
+})

@@ -1115,16 +1115,26 @@ export class HeimdallService {
       .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
       .addTextDisplayComponents(new TextDisplayBuilder().setContent(fitted.body))
 
+    // Who the player is, what they have asked before, what staff already know about them, and the
+    // controls: four different questions, and running them together as one block of text made the
+    // reader find the boundaries themselves. Each is its own text display with a ruled separator
+    // between, so the eye can jump to the one it wants (operator, on the first real card).
     const contextBox = new ContainerBuilder().setAccentColor(ACCENT_CONTEXT)
     const heading = ticket.source === 'ingame' ? '### Player context' : '### Staff controls'
     const blocks = [
-      fitted.context.length ? fitted.context.join('\n') : null,
+      fitted.context.length ? [heading, ...fitted.context].join('\n') : heading,
       fitted.history.length ? `**History**\n${fitted.history.join('\n')}` : null,
       fitted.notes.length ? `**Notes on this account**\n${fitted.notes.join('\n')}` : null,
+      // What the budget dropped, if anything. Its own block, because it is a footnote about the
+      // card rather than part of any one section of it.
       fitted.notices.length ? `-# ${fitted.notices.join(' ')}` : null,
     ].filter(Boolean)
-    contextBox.addTextDisplayComponents(new TextDisplayBuilder().setContent([heading, ...blocks].join('\n')))
-    contextBox.addSeparatorComponents(new SeparatorBuilder().setDivider(false).setSpacing(SeparatorSpacingSize.Small))
+    for (const block of blocks) {
+      contextBox.addTextDisplayComponents(new TextDisplayBuilder().setContent(block))
+      // Large spacing as well as the rule: the divider alone sits tight against the text above and
+      // below it, which is most of what made the block feel undivided in the first place.
+      contextBox.addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Large))
+    }
     contextBox.addActionRowComponents(...await this.controls(ticket))
 
     // A V2 message may carry no content and no embeds; the flag cannot be removed once set.
@@ -1194,9 +1204,15 @@ export class HeimdallService {
   // never fire at all.
   headerSignature(components) {
     const controls = []
+    // The layout itself, as the sequence of component types. Without it, a change that alters
+    // neither a word nor a button - splitting one text display into four with rules between them -
+    // compares equal to what is already posted, and every card already in a channel keeps the old
+    // layout until something unrelated happens to it. Cheap, and it makes a redesign land at once.
+    const shape = []
     const walk = (items) => {
       for (const raw of items ?? []) {
         const item = typeof raw?.toJSON === 'function' ? raw.toJSON() : raw
+        shape.push(item?.type ?? item?.data?.type ?? '?')
         const id = item?.custom_id ?? item?.customId ?? item?.data?.custom_id
         if (id) controls.push(`${id}|${item.label ?? item.data?.label ?? ''}|${item.disabled ?? item.data?.disabled ?? false}`)
         if (Array.isArray(item?.components)) walk(item.components)
@@ -1207,7 +1223,7 @@ export class HeimdallService {
     // NUL and a 0x01 into this source file: it still ran, but `file` called discord.js data, grep
     // and git grep treated it as binary, and any formatter or editor save could have stripped them
     // silently - changing what this function returns without changing a visible character.
-    return `${this.componentText(components)}\u0000${controls.join('\u0001')}`
+    return `${this.componentText(components)}\u0000${controls.join('\u0001')}\u0000${shape.join(',')}`
   }
 
   // Stored id first, marker scan second, nothing third. The scan is recovery, not the mechanism:
