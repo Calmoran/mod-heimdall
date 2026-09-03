@@ -76,11 +76,18 @@ const NO_NOTES_LINE = 'No notes on this account.'
 // How long the fallback status message stays before it is removed. Long enough to read, short
 // enough not to become the clutter this replaced.
 const EPHEMERAL_STATUS_MS = 8_000
-// THE SWITCH. An in-game ticket's notes, GM-action lines and identity changes go to a work thread
-// under its channel, keeping the channel itself a clean transcript of the conversation. The
-// operator asked for this to be cheap to reverse until he has used it: set this to false and
-// every one of them posts in the channel again, exactly as before. Nothing else changes.
-export const IN_GAME_WORK_THREAD = true
+// Whether an in-game ticket's notes, GM-action lines and identity changes go to a work thread
+// under its channel - keeping the channel itself a clean transcript of the conversation - or stay
+// in the channel as they did before 2.0.0.
+//
+// This began as a constant in the source. It is a stored setting now, changed with
+// `/ticket work-split` and `/ticket work-merge`, because the decision belongs to whoever runs the
+// Discord rather than to whoever can edit a file and restart a bot. An absent row means split.
+const WORK_SPLIT_SETTING = 'discord.work_split'
+// Read through on every line that needs it, so the commands take effect without a restart. The
+// cache exists only so a burst of notes does not become a burst of identical queries; it is short
+// enough that nobody presses the command and wonders whether it worked.
+const WORK_SPLIT_TTL_MS = 5_000
 const MARKER_PREFIX = 'mod-heimdall'
 const INSTALL_ID_SETTING = 'discord.install_id'
 // Discord rejects webhook and username values containing "discord" or "clyde"
@@ -1196,7 +1203,11 @@ export class HeimdallService {
       }
     }
     walk(components)
-    return `${this.componentText(components)} ${controls.join('')}`
+    // The separators are escapes, not the raw bytes they stand for. Writing them literally put a
+    // NUL and a 0x01 into this source file: it still ran, but `file` called discord.js data, grep
+    // and git grep treated it as binary, and any formatter or editor save could have stripped them
+    // silently - changing what this function returns without changing a visible character.
+    return `${this.componentText(components)}\u0000${controls.join('\u0001')}`
   }
 
   // Stored id first, marker scan second, nothing third. The scan is recovery, not the mechanism:
@@ -1347,15 +1358,37 @@ export class HeimdallService {
   // inherits that privacy with no membership to manage, no join step and no per-member adds. It
   // costs nothing against the 50/500 channel caps either; threads do not count.
   //
-  // Behind one switch, deliberately. The operator wants to use it before deciding he likes it,
-  // and with IN_GAME_WORK_THREAD off, workSurfaceFor returns the channel exactly as before.
+  // Whether the in-game half splits is the staff's decision at runtime - `/ticket work-split` and
+  // `/ticket work-merge` - and it is read here, per line, so it takes effect without a restart.
+  //
+  // A DISCORD-native ticket is not affected by either command and never can be: its reporter can
+  // read the channel, so merging staff notes into it would put them in front of the person the
+  // notes are about.
   async workSurface(channel, ticket) {
     if (ticket.source === 'discord') return this.staffSurface(channel, ticket)
     const legacy = await this.staffSurface(channel, ticket)
     // A legacy threaded in-game ticket already has somewhere for this to go.
     if (legacy !== channel) return legacy
-    if (!IN_GAME_WORK_THREAD) return channel
+    if (!await this.workSplitEnabled()) return channel
     return (await this.ensureWorkThread(channel, ticket)) ?? channel
+  }
+
+  // Absent means split: that is 2.0.0's default, and an install that has never run either command
+  // gets the new behaviour rather than the old one.
+  async workSplitEnabled() {
+    const now = Date.now()
+    if (this._workSplit && now < this._workSplit.until) return this._workSplit.value
+    const raw = await this.repository.getSetting(WORK_SPLIT_SETTING).catch(() => null)
+    const value = raw === null || raw === undefined ? true : raw !== '0'
+    this._workSplit = { value, until: now + WORK_SPLIT_TTL_MS }
+    return value
+  }
+
+  async setWorkSplit(enabled) {
+    await this.repository.setSetting(WORK_SPLIT_SETTING, enabled ? '1' : '0')
+    // Updated rather than dropped, so the admin who ran the command does not have to wait out the
+    // cache to see it take effect.
+    this._workSplit = { value: enabled, until: Date.now() + WORK_SPLIT_TTL_MS }
   }
 
   async workSurfaceFor(interaction, ticket) {
@@ -2660,6 +2693,36 @@ Last error: \`${reason}\``
       const rows = await this.repository.listStaff()
       return interaction.reply({ content: rows.length ? rows.map((row) => `<@${row.discord_user_id}> → ${row.gm_name}${row.enabled ? '' : ' (disabled)'}`).join('\n') : 'No staff mappings are configured.', flags: MessageFlags.Ephemeral, allowedMentions: { users: rows.map((row) => row.discord_user_id), roles: [], repliedUser: false } })
     }
+    // Where staff work on an in-game ticket goes. One setting for the install, not per ticket, and
+    // forward-only: switching never moves, copies or deletes anything already posted. A ticket
+    // that already has a `work-` thread keeps it; after work-merge that thread simply stops
+    // growing, and after work-split a new one is created on the next line that needs it.
+    if (command === 'work-split' || command === 'work-merge') {
+      const wanted = command === 'work-split'
+      const current = await this.workSplitEnabled()
+      // Said in both branches: an admin running this expects it to govern every ticket, and the
+      // one kind it cannot govern is the kind where getting it wrong is worst.
+      const caveat = ' Discord-opened tickets keep their private staff thread either way — the player can read their channel.'
+      if (current === wanted) {
+        return interaction.reply({
+          content: (wanted
+            ? 'Work already goes to a `work-` thread under each in-game ticket. Nothing changed.'
+            : "Work already stays in each in-game ticket's channel. Nothing changed.") + caveat,
+          flags: MessageFlags.Ephemeral,
+          allowedMentions: ALLOWED_MENTIONS,
+        })
+      }
+      await this.setWorkSplit(wanted)
+      await this.repository.audit(null, 'work_mode_changed', interaction.user.id, { mode: wanted ? 'split' : 'merged' })
+      this.logger.info('Work surface mode changed', { mode: wanted ? 'split' : 'merged', by: interaction.user.id })
+      return interaction.reply({
+        content: (wanted
+          ? 'Work now goes to a `work-` thread under each in-game ticket.'
+          : "Work now stays in each in-game ticket's channel.") + caveat,
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: ALLOWED_MENTIONS,
+      })
+    }
     const ticketId = interaction.options.getInteger('ticket_id', true)
     // Access to a closed ticket without reopening it. Reopening was the only way to let a GM read
     // a ticket they had not handled, and it is far too big a lever: it clears the claim, puts the
@@ -2817,4 +2880,8 @@ export function ticketAdminCommand() {
     .addSubcommand((subcommand) => subcommand.setName('grant').setDescription('Let a staff member read a closed ticket, without reopening it')
       .addIntegerOption((option) => option.setName('ticket_id').setDescription('Internal ticket number').setRequired(true).setMinValue(1))
       .addUserOption((option) => option.setName('user').setDescription('Rostered staff member').setRequired(true)))
+    .addSubcommand((subcommand) => subcommand.setName('work-split')
+      .setDescription('Staff notes and GM actions go to a work thread under each in-game ticket'))
+    .addSubcommand((subcommand) => subcommand.setName('work-merge')
+      .setDescription("Staff notes and GM actions stay in each in-game ticket's channel"))
 }

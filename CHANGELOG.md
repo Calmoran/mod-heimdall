@@ -74,6 +74,12 @@ Nothing here needs configuring. It is written down because your staff will notic
 - **Notes show the GM's name**, not a Discord mention that rendered as a blue pill mid-sentence
   and, once that account had left the server, as a bare numeric id.
 
+- **`/ticket work-split` and `/ticket work-merge`** (administrators) decide whether staff work on
+  an **in-game** ticket goes to that `work-` thread or stays in the ticket's channel as it did
+  before 2.0.0. Split is the default. The change applies to the next line written, with no restart,
+  and never moves anything already posted. Discord-opened tickets keep their private staff thread
+  under both settings - their reporter can read the channel.
+
 ### Changed
 
 - **Heimdall has a database of its own.** The seven `heimdall_*` tables now live in a database

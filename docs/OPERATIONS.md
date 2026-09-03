@@ -57,6 +57,30 @@ Discord-opened ticket uses its existing private staff thread. An in-game ticket
 gets a thread named `work-<ticket>` under its channel; that channel is already
 staff-only, so the thread is too, and nobody has to be added to it.
 
+### Turning the in-game split off
+
+If you would rather have everything in the one channel, as it was before 2.0.0:
+
+| Command | Effect |
+|---|---|
+| `/ticket work-split` | staff work goes to a `work-` thread under each in-game ticket (the default) |
+| `/ticket work-merge` | staff work stays in each in-game ticket's channel |
+
+Administrators only. One setting for the whole install, not per ticket, and it
+takes effect on the next line written - no bot restart.
+
+Two rules worth knowing before you use them:
+
+- **In-game tickets only.** A Discord-opened ticket keeps its private staff
+  thread under both settings, and nothing will move its staff notes into the
+  channel: the person who opened the ticket is reading that channel.
+- **Forward-only.** Switching never moves, copies or deletes anything already
+  posted. A ticket that already has a `work-` thread keeps it; after
+  `work-merge` that thread simply stops growing, and after `work-split` a new
+  one is made on the next line that needs one.
+
+Each change is recorded in the audit table with the administrator who made it.
+
 ## Buttons no longer answer back
 
 A button press that works changes the card, or posts in the channel, and says

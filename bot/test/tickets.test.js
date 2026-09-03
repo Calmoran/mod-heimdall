@@ -6,7 +6,7 @@ import test from 'node:test'
 
 import { ChannelType, MessageFlags, PermissionFlagsBits } from 'discord.js'
 
-import { ADMIN_PERMISSIONS, HeimdallService, IN_GAME_WORK_THREAD, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
+import { ADMIN_PERMISSIONS, HeimdallService, REQUIRED_PERMISSIONS, ticketAdminCommand } from '../src/discord.js'
 import { deriveRunId, loadConfig } from '../src/config.js'
 import { Logger } from '../src/logger.js'
 import { TicketRepository } from '../src/repository.js'
@@ -319,7 +319,7 @@ test('the install guide and the preflight name the same permissions', () => {
 // replaced because they are presentation reached through every lifecycle path; everything else,
 // including refreshVisibility itself, is the real method.
 function adminService() {
-  const seen = { upsert: [], disable: [], reopen: [], reassign: [], threadAdds: [], unarchived: 0, overwrites: [], grants: [], audited: [] }
+  const seen = { upsert: [], disable: [], reopen: [], reassign: [], threadAdds: [], unarchived: 0, overwrites: [], grants: [], audited: [], settings: new Map() }
   // Closed, because /ticket grant refuses a live ticket and every declared subcommand is driven
   // through this one fake. Nothing else here reads the status.
   const ticket = {
@@ -359,6 +359,8 @@ function adminService() {
     ticketGrants: async () => seen.grants,
     addTicketGrant: async (id, userId) => { seen.grants.push(userId); return seen.grants },
     audit: async (...args) => { seen.audited.push(args) },
+    getSetting: async (key) => seen.settings.get(key) ?? null,
+    setSetting: async (key, value) => { seen.settings.set(key, value) },
   }
   service.botRoleId = 'role-bot'
   service.refreshQueueBoard = async () => {}
@@ -2288,22 +2290,14 @@ test('marking a turn failed when nothing was remembered is not an error', async 
 
 // ------------------------------------------------------------------ T12: the work surface
 
-test('the in-game work thread is one switch, and off means exactly what it did before', async () => {
-  const source = fs.readFileSync(new URL('../src/discord.js', import.meta.url), 'utf8')
-  assert.match(source, /export const IN_GAME_WORK_THREAD = (true|false)/,
-    'the work thread is not behind a single switch the operator can flip')
-  assert.equal(typeof IN_GAME_WORK_THREAD, 'boolean')
-
-  // With it off, an in-game ticket's work surface is its channel - the shape that shipped in 1.x.
+test('an install that has never run either command splits the work', async () => {
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
   service.repository = { getThreadId: async () => null, getSetting: async () => null, setSetting: async () => {} }
-  const channel = { id: 'chan-7', threads: { create: async () => ({ id: 'thread-7' }) } }
-  const ticket = { id: 7, public_key: 'R1-7', source: 'ingame' }
-  const surface = await service.workSurface(channel, ticket)
-  assert.equal(surface === channel, !IN_GAME_WORK_THREAD,
-    IN_GAME_WORK_THREAD ? 'the switch is on but chatter still went to the channel'
-      : 'the switch is off but a thread was created anyway')
+  const thread = { id: 'thread-7' }
+  const channel = { id: 'chan-7', threads: { create: async () => thread } }
+  const surface = await service.workSurface(channel, { id: 7, public_key: 'R1-7', source: 'ingame' })
+  assert.equal(surface, thread, 'an absent setting must mean split, not merged')
 })
 
 test('a Discord ticket keeps its private staff thread as the work surface', async () => {
@@ -2379,4 +2373,162 @@ test('a resync during the upgrade replaces the 1.x header instead of posting bes
     'the upgrade left two headers in the channel')
   assert.equal(legacy.deleted, true, 'the 1.x header was left sitting above its replacement')
   assert.ok(headerIds.get('5:staff'), 'the replacement was posted without remembering its id')
+})
+
+// ------------------------------------------------ T12b: /ticket work-split and /ticket work-merge
+
+function workModeService(initial = null) {
+  const { service, seen } = adminService()
+  if (initial !== null) seen.settings.set('discord.work_split', initial)
+  return { service, seen }
+}
+
+test('work-split and work-merge each set the mode and record who did it', async () => {
+  for (const [command, stored, mode] of [['work-merge', '0', 'merged'], ['work-split', '1', 'split']]) {
+    const { service, seen } = workModeService(command === 'work-merge' ? '1' : '0')
+    const interaction = adminInteraction(command)
+    await service.handleAdminCommand(interaction)
+
+    assert.equal(seen.settings.get('discord.work_split'), stored, `${command} did not store the mode`)
+    const audited = seen.audited.at(-1)
+    assert.equal(audited[0], null, 'the mode is an install-wide setting, not a change to one ticket')
+    assert.equal(audited[1], 'work_mode_changed')
+    assert.equal(audited[2], '100', 'the audit row does not say who changed it')
+    assert.deepEqual(audited[3], { mode })
+    assert.equal(interaction.replies[0].flags, MessageFlags.Ephemeral)
+  }
+})
+
+test('each acknowledgement states the resulting mode, and names the exception', async () => {
+  const { service: splitter } = workModeService('0')
+  const splitAck = adminInteraction('work-split')
+  await splitter.handleAdminCommand(splitAck)
+  assert.match(splitAck.replies[0].content, /now goes to a `work-` thread/)
+
+  const { service: merger } = workModeService('1')
+  const mergeAck = adminInteraction('work-merge')
+  await merger.handleAdminCommand(mergeAck)
+  assert.match(mergeAck.replies[0].content, /now stays in each in-game ticket's channel/)
+
+  // The one kind of ticket neither command governs, said in both, because getting this wrong puts
+  // staff notes in front of the player they are about.
+  for (const reply of [splitAck.replies[0], mergeAck.replies[0]]) {
+    assert.match(reply.content, /Discord-opened tickets keep their private staff thread either way/)
+  }
+})
+
+test('running the command for the mode already in force changes nothing and says so', async () => {
+  for (const [command, already] of [['work-split', '1'], ['work-merge', '0']]) {
+    const { service, seen } = workModeService(already)
+    const interaction = adminInteraction(command)
+    await service.handleAdminCommand(interaction)
+
+    assert.match(interaction.replies[0].content, /already/)
+    assert.match(interaction.replies[0].content, /Nothing changed/)
+    assert.equal(seen.audited.length, 0, 'a no-op wrote an audit row claiming the mode was changed')
+  }
+})
+
+test('neither command is available to a staff member without the admin role', async () => {
+  for (const command of ['work-split', 'work-merge']) {
+    const { service } = workModeService('1')
+    await assert.rejects(() => service.handleAdminCommand(adminInteraction(command, ['role-mod'])), /administrators/)
+  }
+})
+
+// The four cases that matter, and the two that matter most are the Discord-native ones: neither
+// command may ever move staff notes into a channel the reporter can read.
+test('the mode governs in-game tickets and never Discord-native ones', async () => {
+  const cases = [
+    { source: 'ingame', stored: '1', expect: 'work-thread' },
+    { source: 'ingame', stored: '0', expect: 'channel' },
+    { source: 'discord', stored: '1', expect: 'staff-thread' },
+    { source: 'discord', stored: '0', expect: 'staff-thread' },
+  ]
+  for (const row of cases) {
+    const service = Object.create(HeimdallService.prototype)
+    service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+    const workThread = { id: 'work-thread' }
+    const staffThread = { id: 'staff-thread', archived: false }
+    service.repository = {
+      getSetting: async (key) => (key === 'discord.work_split' ? row.stored : null),
+      setSetting: async () => {},
+      getThreadId: async () => (row.source === 'discord' ? 'staff-thread' : null),
+      activeStaffIds: async () => ['s1'],
+    }
+    service.client = { channels: { fetch: async () => staffThread } }
+    const channel = { id: 'chan-7', threads: { create: async () => workThread } }
+    const surface = await service.workSurface(channel, { id: 7, public_key: 'R1-7', source: row.source })
+
+    const got = surface === channel ? 'channel' : surface.id
+    assert.equal(got, row.expect,
+      `${row.source} ticket with work_split=${row.stored} put staff work in the wrong place`)
+  }
+})
+
+// Forward-only. Switching is a decision about what happens next, not a migration.
+test('switching to merged leaves an existing work thread alone and writes to the channel', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  service.logger = { error: () => {}, warn: () => {}, info: () => {} }
+  let threadsCreated = 0
+  let settingDeleted = false
+  const existing = { id: 'work-thread', archived: false }
+  service.repository = {
+    getSetting: async (key) => (key === 'discord.work_split' ? '0' : 'work-thread'),
+    setSetting: async () => {},
+    deleteSetting: async () => { settingDeleted = true },
+    getThreadId: async () => null,
+  }
+  service.client = { channels: { fetch: async () => existing } }
+  const channel = { id: 'chan-7', threads: { create: async () => { threadsCreated += 1; return existing } } }
+
+  const surface = await service.workSurface(channel, { id: 7, public_key: 'R1-7', source: 'ingame' })
+  assert.equal(surface, channel, 'a merged install still routed the line to the old thread')
+  assert.equal(threadsCreated, 0)
+  assert.equal(settingDeleted, false, 'merging deleted the record of an existing thread')
+})
+
+// The point of storing this rather than compiling it in: it has to take effect on a running bot.
+test('the mode is read through, not snapshotted at startup', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  let stored = '1'
+  let reads = 0
+  service.repository = {
+    getSetting: async () => { reads += 1; return stored },
+    setSetting: async (key, value) => { stored = value },
+  }
+  assert.equal(await service.workSplitEnabled(), true)
+
+  // Changed through the command: visible at once, without waiting out the cache or a restart.
+  await service.setWorkSplit(false)
+  assert.equal(await service.workSplitEnabled(), false)
+
+  // Changed underneath the process: visible once the short cache lapses, still without a restart.
+  stored = '1'
+  service._workSplit.until = Date.now() - 1
+  assert.equal(await service.workSplitEnabled(), true)
+  assert.ok(reads >= 2, 'the setting was read once and cached forever')
+})
+
+test('a burst of lines does not become a burst of identical queries', async () => {
+  const service = Object.create(HeimdallService.prototype)
+  let reads = 0
+  service.repository = { getSetting: async () => { reads += 1; return '1' } }
+  for (let i = 0; i < 10; i += 1) await service.workSplitEnabled()
+  assert.equal(reads, 1)
+})
+
+// Reviewer finding, T12: the redraw fingerprint's separators were written as raw bytes. The file
+// still ran, but `file` called it data, grep and git grep treated it as binary, and any formatter
+// or editor save could have stripped them silently - changing what the fingerprint returns without
+// changing a visible character.
+test('no source file carries a control byte outside tab and newline', () => {
+  const names = ['discord.js', 'domain.js', 'repository.js', 'config.js', 'index.js', 'logger.js', 'archive.js', 'env.js', 'diagnose.js']
+  for (const name of names) {
+    const bytes = fs.readFileSync(new URL(`../src/${name}`, import.meta.url))
+    for (const [index, byte] of bytes.entries()) {
+      if (byte >= 0x20 || byte === 0x09 || byte === 0x0A || byte === 0x0D) continue
+      assert.fail(`src/${name} carries a 0x${byte.toString(16).padStart(2, '0')} byte at offset ${index}; write it as an escape`)
+    }
+  }
 })
