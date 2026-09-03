@@ -72,6 +72,14 @@ const DELIVERY_ACTIONS = {
 const ACCENT_TICKET = { open: 0xE8A33D, claimed: 0x4F8FF0, closing: 0x4F8FF0, closed: 0x6B7280, cancelled: 0x6B7280 }
 const ACCENT_CONTEXT = 0x3F4451
 const NO_NOTES_LINE = 'No notes on this account.'
+// How long the fallback status message stays before it is removed. Long enough to read, short
+// enough not to become the clutter this replaced.
+const EPHEMERAL_STATUS_MS = 8_000
+// THE SWITCH. An in-game ticket's notes, GM-action lines and identity changes go to a work thread
+// under its channel, keeping the channel itself a clean transcript of the conversation. The
+// operator asked for this to be cheap to reverse until he has used it: set this to false and
+// every one of them posts in the channel again, exactly as before. Nothing else changes.
+export const IN_GAME_WORK_THREAD = true
 const MARKER_PREFIX = 'mod-heimdall'
 const INSTALL_ID_SETTING = 'discord.install_id'
 // Discord rejects webhook and username values containing "discord" or "clyde"
@@ -1280,6 +1288,71 @@ export class HeimdallService {
     await this.redrawHeader(surface, ticket, 'staff', await this.headerMessage(ticket, body))
   }
 
+  // ------------------------------------------------------------------------- the work surface
+  //
+  // The ticket channel is the conversation: the player's turns and the GM's, in order, and
+  // nothing else. Notes, GM-action lines, identity changes and reopen notices are staff working
+  // on the ticket, not part of the exchange, and mixing them in is what made the channel
+  // unreadable as a transcript.
+  //
+  // A Discord-native ticket already has a private staff thread, because its reporter is in the
+  // channel. An in-game ticket had nowhere: its channel IS the staff surface. It gets a thread of
+  // its own - a PUBLIC one, because the parent is already staff-only by its overwrites, so it
+  // inherits that privacy with no membership to manage, no join step and no per-member adds. It
+  // costs nothing against the 50/500 channel caps either; threads do not count.
+  //
+  // Behind one switch, deliberately. The operator wants to use it before deciding he likes it,
+  // and with IN_GAME_WORK_THREAD off, workSurfaceFor returns the channel exactly as before.
+  async workSurface(channel, ticket) {
+    if (ticket.source === 'discord') return this.staffSurface(channel, ticket)
+    const legacy = await this.staffSurface(channel, ticket)
+    // A legacy threaded in-game ticket already has somewhere for this to go.
+    if (legacy !== channel) return legacy
+    if (!IN_GAME_WORK_THREAD) return channel
+    return (await this.ensureWorkThread(channel, ticket)) ?? channel
+  }
+
+  async workSurfaceFor(interaction, ticket) {
+    const channel = this.ticketChannelFrom(interaction)
+      ?? (ticket.discord_channel_id ? await this.client.channels.fetch(ticket.discord_channel_id).catch(() => null) : null)
+    if (!channel) return this.staffThreadFor(interaction, ticket)
+    return this.workSurface(channel, ticket)
+  }
+
+  workThreadSettingKey(ticketId) {
+    return `discord.ticket_work_thread.${ticketId}`
+  }
+
+  // Created lazily, on the first thing that needs it, so a ticket nobody has worked yet does not
+  // collect an empty thread.
+  async ensureWorkThread(channel, ticket) {
+    const storedId = await this.repository.getSetting(this.workThreadSettingKey(ticket.id)).catch(() => null)
+    if (storedId) {
+      const existing = await this.client.channels.fetch(storedId).catch(() => null)
+      if (existing) {
+        if (existing.archived) await existing.setArchived(false, 'Ticket still needs staff attention').catch(() => null)
+        return existing
+      }
+      this.logger.warn(`Stored work thread ${storedId} for ${ticket.public_key} is gone; creating a replacement.`)
+    }
+    if (typeof channel.threads?.create !== 'function') return null
+    const thread = await channel.threads.create({
+      name: `work-${ticket.public_key}`.slice(0, 100),
+      type: ChannelType.PublicThread,
+      autoArchiveDuration: 10080,
+      reason: `Staff working notes for ${ticket.public_key}`,
+    }).catch((error) => {
+      // Never at the cost of the action that needed it: a note that cannot reach a thread still
+      // has to reach somewhere, and the channel is somewhere.
+      this.logger.warn(`Could not create the work thread for ${ticket.public_key}; using the channel.`, error?.message ?? error)
+      return null
+    })
+    if (!thread) return null
+    await this.repository.setSetting(this.workThreadSettingKey(ticket.id), thread.id).catch(() => null)
+    this.logger.info('Work thread created', { ticket: ticket.public_key, thread: thread.id })
+    return thread
+  }
+
   // The controls live in the thread, so an interaction usually arrives from inside it. Falling
   // back to the parent covers a control used from the channel and older tickets predating threads.
   async staffThreadFor(interaction, ticket) {
@@ -1524,6 +1597,7 @@ export class HeimdallService {
       if (ticket.source !== 'ingame') throw new Error('This ticket has no in-game player.')
       // Travels the same delivery queue as whisper delivery: the module answers it and writes a
       // fresh snapshot. The version in the key lets a GM refresh repeatedly.
+      const ack = await this.beginSilent(interaction)
       await this.repository.enqueue({
         ticketId: ticket.id,
         direction: 'to_game',
@@ -1531,11 +1605,10 @@ export class HeimdallService {
         payload: { realmTag: ticket.realm_tag, sourceTicketId: ticket.source_ticket_id },
         uniqueParts: ['refresh-context', interaction.id],
       })
-      return interaction.reply({
-        content: 'Asked the realm for fresh player info. The card updates within a few seconds — press Refresh again to redraw it.',
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: ALLOWED_MENTIONS,
-      })
+      // The old text said to press Refresh again to redraw the card. That was never true - nothing
+      // repainted on a snapshot write - and it is now unnecessary: the module answers this row with
+      // a context_updated delivery and the header redraws itself.
+      return this.endSilent(interaction, ack, 'Asked the realm for fresh player info. The card updates in a moment.')
     }
     if (action === 'identity-toggle' || action === 'identity-login' || action === 'identity-logout') {
       const staff = await this.requireRosteredStaff(interaction)
@@ -1550,32 +1623,81 @@ export class HeimdallService {
       const held = action === 'identity-toggle'
         ? (await this.identityState(ticket.realm_tag, gmName)) !== 'held'
         : action === 'identity-login'
+      const ack = await this.beginSilent(interaction)
       await this.setIdentityHeld(ticket.realm_tag, ticket.id, gmName, held, interaction.user.id)
-      await this.refreshTicketHeader(interaction.channel, ticket)
+      await this.refreshTicketHeader(this.ticketChannelFrom(interaction) ?? interaction.channel, ticket)
 
-      return interaction.reply({
-        content: held
-          ? `**${gmName}** is now in game and players can whisper you.`
-          : `**${gmName}** has left the game. This affects every ticket you have claimed, not just this one.`,
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: ALLOWED_MENTIONS,
-      })
+      // The header's identity line carries the new state, so the press needs no notice of its own.
+      // What the header cannot say is that this reaches beyond the ticket being looked at -
+      // identity state is per GM, not per ticket - so that goes where the rest of the team sees
+      // it, once, rather than privately to the person who already knew.
+      const line = held
+        ? `**${gmName}** is in game and players can whisper them.`
+        : `**${gmName}** has left the game. This affects every ticket ${gmName} has claimed, not just this one.`
+      const identitySurface = await this.workSurfaceFor(interaction, ticket)
+      await identitySurface.send({
+        content: `${line} (<@${interaction.user.id}>)`,
+        allowedMentions: { users: [interaction.user.id], roles: [], repliedUser: false },
+      }).catch((error) => this.logger.warn('Could not post the identity change to the work surface', error))
+      return this.endSilent(interaction, ack, line)
     }
     if (action === 'reopen') {
       if (!this.isAdmin(interaction)) throw new Error('Only an administrator can reopen a ticket.')
+      const ack = await this.beginSilent(interaction)
       const reopened = await this.repository.reopen(ticket.id, interaction.user.id)
       await this.refreshVisibility(this.ticketChannelFrom(interaction), reopened)
-      const reopenThread = await this.staffThreadFor(interaction, reopened)
-      await reopenThread.send({
+      const reopenSurface = await this.workSurfaceFor(interaction, reopened)
+      await reopenSurface.send({
         content: 'Ticket reopened. It is now **unassigned** and back in the pool — someone has to claim it again before anyone can reply to the player.',
         allowedMentions: ALLOWED_MENTIONS,
       })
-      return interaction.reply({
-        content: 'Ticket reopened. Reopening clears the previous claim, so it is unassigned until someone claims it again.',
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: ALLOWED_MENTIONS,
-      })
+      return this.endSilent(interaction, ack, 'Ticket reopened, and unassigned until someone claims it again.')
     }
+  }
+
+  // ------------------------------------------------------------------ acknowledging a button
+  //
+  // Every successful press used to answer with an ephemeral message, and most of them said
+  // something the header or the channel was about to say anyway - so a GM working a ticket
+  // collected a stack of private notices repeating what was already on screen.
+  //
+  // UPDATE_MESSAGE and DEFERRED_UPDATE_MESSAGE acknowledge a component interaction by editing
+  // the message the control is on. Neither creates a reply. That is the right answer whenever
+  // the outcome is visible in the header or the conversation; ephemerals are kept for errors,
+  // for the destructive close confirmation, and for the one path that cannot go quiet.
+  canDeferUpdate(interaction) {
+    if (typeof interaction.deferUpdate !== 'function') return false
+    // A modal can only acknowledge invisibly when Discord considers it to have come from a
+    // message component. Every modal Heimdall opens is opened from a button or a select, so this
+    // should always be true - but "should" is not "is", and the fallback below is the old
+    // behaviour rather than a failure.
+    if (interaction.isModalSubmit?.()) return Boolean(interaction.isFromMessage?.())
+    return true
+  }
+
+  async beginSilent(interaction) {
+    if (interaction.deferred || interaction.replied) return { silent: true }
+    if (this.canDeferUpdate(interaction)) {
+      await interaction.deferUpdate()
+      return { silent: true }
+    }
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+    return { silent: false }
+  }
+
+  async endSilent(interaction, ack, text) {
+    if (ack.silent) return undefined
+    await interaction.editReply({ content: text, allowedMentions: ALLOWED_MENTIONS }).catch(() => undefined)
+    return this.deleteReplyLater(interaction)
+  }
+
+  // Best effort by construction, and the plan says so out loud: the interaction token is valid
+  // for fifteen minutes and an in-process timer dies with the process. A leftover ephemeral is
+  // cosmetic - it is not worth a durable job, a table or a scheduler.
+  deleteReplyLater(interaction, delayMs = EPHEMERAL_STATUS_MS) {
+    const timer = setTimeout(() => { interaction.deleteReply().catch(() => undefined) }, delayMs)
+    timer.unref?.()
+    return timer
   }
 
   // Only the GM holding the ticket, or an admin. A ticket nobody has claimed has nobody entitled
@@ -1596,7 +1718,7 @@ export class HeimdallService {
     // Same validation .ticket assign puts a GM name through, for the same reason: this string
     // becomes part of a command.
     const name = validateGmName(ticket.player_name ?? '')
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+    const ack = await this.beginSilent(interaction)
 
     // The realm-side half: an intent row the module performs. The module composes the command
     // itself, so nothing here becomes command text.
@@ -1617,12 +1739,13 @@ export class HeimdallService {
     this.logger.info('GM action queued', { ticket: ticket.public_key, action: key, by: interaction.user.id, target: name })
     await this.repository.audit(ticket.id, 'gm_action', interaction.user.id, { action: key, ...context })
 
-    // Into the staff thread, so the rest of the team sees what was done rather than only the
-    // person who clicked.
+    // Into the work surface, so the rest of the team sees what was done rather than only the
+    // person who clicked. That durable line is the record, which is why the press itself no
+    // longer answers with an ephemeral copy of it.
     const message = action.success(name, context)
-    const thread = await this.staffThreadFor(interaction, ticket)
-    await thread.send({ content: `${message} (<@${interaction.user.id}>)`, allowedMentions: { users: [interaction.user.id], roles: [], repliedUser: false } })
-    return interaction.editReply({ content: message, allowedMentions: ALLOWED_MENTIONS })
+    const surface = await this.workSurfaceFor(interaction, ticket)
+    await surface.send({ content: `${message} (<@${interaction.user.id}>)`, allowedMentions: { users: [interaction.user.id], roles: [], repliedUser: false } })
+    return this.endSilent(interaction, ack, message)
   }
 
   async handleSelect(interaction) {
@@ -1671,27 +1794,25 @@ export class HeimdallService {
     // Ordinary staff chatter needs no button - thread messages are archived on their own.
     if (action === 'note-submit') {
       await this.requireRosteredStaff(interaction)
+      const ack = await this.beginSilent(interaction)
       await this.repository.recordMessage({ ticketId: ticket.id, actorKind: 'staff', actorRef: interaction.user.id, body, idempotencyKey: interaction.id })
       const accountId = await this.ticketAccountId(ticket)
       let noteId = null
       if (accountId) noteId = await this.repository.addPlayerNote({ accountId, actorId: interaction.user.id, body, ticketId: ticket.id, idempotencyKey: interaction.id })
 
-      // Into the staff thread: this used to post where a Discord ticket's author could read it.
-      const noteThread = await this.staffThreadFor(interaction, ticket)
-      await noteThread.send({
+      // Into the work surface: this used to post where a Discord ticket's author could read it,
+      // and it is staff chatter rather than part of the conversation with the player.
+      const noteSurface = await this.workSurfaceFor(interaction, ticket)
+      await noteSurface.send({
         content: noteId
           ? `Note \`#${noteId}\` from <@${interaction.user.id}>: ${body}`
           : `Internal note from <@${interaction.user.id}>: ${body}`,
         allowedMentions: { users: [interaction.user.id], roles: [], repliedUser: false },
       })
       await this.refreshTicketHeader(this.ticketChannelFrom(interaction), ticket)
-      return interaction.reply({
-        content: noteId
-          ? `Saved as note \`#${noteId}\`. It is on the card above, and on every future ticket this account opens - on any character. Remove Note takes it back off.`
-          : 'Note saved to this ticket. No game account is known for it, so it stays here rather than following a player.',
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: ALLOWED_MENTIONS,
-      })
+      return this.endSilent(interaction, ack, noteId
+        ? `Saved as note \`#${noteId}\`. It follows the account, not this ticket.`
+        : 'Note saved to this ticket. No game account is known for it, so it stays here.')
     }
     if (action === 'remove-note-submit') {
       await this.requireRosteredStaff(interaction)
@@ -1701,13 +1822,15 @@ export class HeimdallService {
       const accountId = await this.ticketAccountId(ticket)
       const owned = accountId ? await this.repository.playerNotes(accountId, 100) : []
       if (!owned.some((note) => note.id === noteId)) throw new Error(`Note #${noteId} is not one of this account's notes. The card lists the numbers you can remove.`)
+      const ack = await this.beginSilent(interaction)
       await this.repository.deletePlayerNote(noteId, interaction.user.id)
-      await this.refreshTicketHeader(this.ticketChannelFrom(interaction), ticket)
-      return interaction.reply({
-        content: `Note \`#${noteId}\` removed from the account. The ticket transcript still records that it was written.`,
-        flags: MessageFlags.Ephemeral,
-        allowedMentions: ALLOWED_MENTIONS,
+      const removeSurface = await this.workSurfaceFor(interaction, ticket)
+      await removeSurface.send({
+        content: `Note \`#${noteId}\` removed from the account by <@${interaction.user.id}>. The transcript still records that it was written.`,
+        allowedMentions: { users: [interaction.user.id], roles: [], repliedUser: false },
       })
+      await this.refreshTicketHeader(this.ticketChannelFrom(interaction), ticket)
+      return this.endSilent(interaction, ack, `Note \`#${noteId}\` removed from the account.`)
     }
     if (action === 'gm-teleport-submit') {
       return this.runGmAction(interaction, ticket, 'teleport', { destination: validateTeleDestination(body) })
@@ -1717,6 +1840,7 @@ export class HeimdallService {
 
   async claim(interaction, ticket) {
     const staff = await this.requireRosteredStaff(interaction)
+    const ack = await this.beginSilent(interaction)
     const claimed = await this.repository.claim({ ticketId: ticket.id, discordUserId: interaction.user.id, gmName: staff.gm_name })
     if (claimed.source === 'ingame') {
       // Canonicalised here, as the row is written, because the row is what the realm acts on and
@@ -1734,7 +1858,9 @@ export class HeimdallService {
       })
     }
     await this.refreshVisibility(this.ticketChannelFrom(interaction), claimed)
-    await interaction.reply({ content: `Claimed as **${staff.gm_name}**. Other staff can no longer see this channel.`, flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS })
+    // The header now names the claimant and the channel has just changed category and visibility.
+    // Saying it again privately adds nothing.
+    return this.endSilent(interaction, ack, `Claimed as **${staff.gm_name}**. Other staff can no longer see this channel.`)
   }
 
   async replyToPlayer(interaction, ticket, body) {
@@ -1745,7 +1871,7 @@ export class HeimdallService {
     // that window, so the GM saw nothing at all at the exact moment something had gone wrong - the
     // log showed the real error followed by "Unknown interaction". Deferring first means the reason
     // always reaches them, however long the realm takes to refuse.
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral })
+    const ack = await this.beginSilent(interaction)
 
     // A forgotten logout should not be a dead end: bring the identity back rather than refusing.
     const wasOffline = (await this.identityState(ticket.realm_tag, staff.gm_name)) !== 'held'
@@ -1764,23 +1890,55 @@ export class HeimdallService {
       })
     }
     await this.repository.recordMessage({ ticketId: ticket.id, actorKind: 'staff', actorRef: interaction.user.id, body, idempotencyKey: interaction.id })
-    const replyThread = await this.staffThreadFor(interaction, ticket)
-    await replyThread.send({ content: `**${staff.gm_name}** replied in game.`, allowedMentions: ALLOWED_MENTIONS })
+
+    // The channel only ever said "X replied in game", so the half of every conversation that came
+    // from staff was missing from the one place a GM would go to read it. The words go in, under
+    // the identity that spoke them, beside the player's own.
+    const channel = this.ticketChannelFrom(interaction) ?? interaction.channel
+    const context = await this.repository.playerContext(ticket.id).catch(() => null)
+    await this.postGmTurn({ ticket, channel, gmName: staff.gm_name, body, online: Boolean(context?.online) })
+
     // An implicit login just changed the identity state the header reports.
-    if (wasOffline) await this.refreshTicketHeader(interaction.channel, ticket)
+    if (wasOffline) await this.refreshTicketHeader(channel, ticket)
 
     const note = wasOffline ? ' Your in-game identity was logged in for you.' : ''
     // Said unconditionally, this read as a failure notice at the moment of success: the player was
     // online and the whisper had already landed. The module publishes an online indicator for the
     // context card; when it does not know, the cautious wording is still the right one.
-    const context = await this.repository.playerContext(ticket.id).catch(() => null)
     const arrival = context?.online
       ? `Delivering now — ${ticket.player_name} is online.`
       : `It will arrive when ${ticket.player_name} is online.`
-    return interaction.editReply({
-      content: `Sent as ${chunks.length} in-game message${chunks.length === 1 ? '' : 's'}. ${arrival}${note}`,
-      allowedMentions: ALLOWED_MENTIONS,
-    })
+    return this.endSilent(interaction, ack,
+      `Sent as ${chunks.length} in-game message${chunks.length === 1 ? '' : 's'}. ${arrival}${note}`)
+  }
+
+  // The GM's turn in the conversation, posted under the identity's name through the same webhook
+  // the player's whispers use, so the channel reads as one exchange rather than as a player
+  // talking to a wall.
+  //
+  // The marker says what the bot actually knows, which is not the same as delivery. The bot
+  // queues the whisper and the module performs it; nothing tells the bot it landed. So the marker
+  // reports the player's online state from the last context snapshot - which can be up to one
+  // sweep old - and never claims a bare "delivered". A whisper that is genuinely lost surfaces
+  // separately, as a dead letter in this same channel.
+  async postGmTurn({ ticket, channel, gmName, body, online }) {
+    if (!channel) return null
+    const marker = online
+      ? `-# sent — ${ticket.player_name} was online`
+      : `-# queued — waits until ${ticket.player_name} logs in`
+    const content = `${body}\n${marker}`
+    if (RESERVED_USERNAME_WORDS.test(gmName)) {
+      return channel.send({ content: `**${gmName}** (in game): ${content}`, allowedMentions: ALLOWED_MENTIONS })
+        .catch((error) => this.logger.warn('Could not post the GM turn to the channel', error))
+    }
+    try {
+      const webhook = await this.ticketWebhook(channel)
+      return await webhook.send({ username: gmName, content, allowedMentions: ALLOWED_MENTIONS })
+    } catch (error) {
+      this.logger.warn(`Webhook post failed for ${gmName}; falling back to a plain message.`, error?.message ?? error)
+      return channel.send({ content: `**${gmName}** (in game): ${content}`, allowedMentions: ALLOWED_MENTIONS })
+        .catch((sendError) => this.logger.warn('Could not post the GM turn to the channel', sendError))
+    }
   }
 
   // The game module publishes "held" or "offline" per identity into the settings table, and is
@@ -1864,22 +2022,29 @@ export class HeimdallService {
 
   async closeTicket(interaction, ticket, note) {
     if (!this.isAdmin(interaction) && ticket.claimant_discord_user_id !== interaction.user.id) throw new Error('Only an administrator or the assigned staff member can close this ticket.')
+    const ack = await this.beginSilent(interaction)
+    const closer = await this.staffDisplayName(interaction.user.id)
     await this.performClose({
       ticket,
       actorId: interaction.user.id,
       note,
       idempotencyKey: interaction.id,
       channel: this.ticketChannelFrom(interaction),
+      // The player-facing wording, for a channel a player can read. An in-game ticket's channel
+      // has no player in it, so performClose says who closed it and from where instead.
       playerNotice: 'This ticket has been closed and will disappear from your channel list. '
         + 'If you need anything else, open a new ticket from the panel.',
+      staffNotice: `Closed by **${closer}** from Discord.`,
     })
-    return interaction.reply({ content: 'Ticket closed.', flags: MessageFlags.Ephemeral, allowedMentions: ALLOWED_MENTIONS })
+    // The confirmation before this was ephemeral because closing is destructive. The closure
+    // itself is visible: the channel says so, and it moves category.
+    return this.endSilent(interaction, ack, 'Ticket closed.')
   }
 
   // The single close path. Auto-close uses this too, so an automatic closure is identical to a
   // manual one - same database transition, same queued ".ticket close", same channel move and
   // deletion schedule - rather than a parallel implementation that can drift.
-  async performClose({ ticket, actorId, note, idempotencyKey, channel, playerNotice }) {
+  async performClose({ ticket, actorId, note, idempotencyKey, channel, playerNotice, staffNotice = null }) {
     const closed = await this.repository.close(ticket.id, actorId, this.config.retentionDays)
     await this.repository.recordMessage({ ticketId: ticket.id, actorKind: 'staff', actorRef: actorId, body: note, idempotencyKey })
     if (closed.source === 'ingame') {
@@ -1892,7 +2057,7 @@ export class HeimdallService {
         uniqueParts: ['close', idempotencyKey],
       })
     }
-    await this.applyClosureToDiscord(closed, { channel, playerNotice })
+    await this.applyClosureToDiscord(closed, { channel, playerNotice, staffNotice })
     return closed
   }
 
@@ -1904,7 +2069,7 @@ export class HeimdallService {
   // Idempotent by construction: the delete_channel job is keyed, and reapplying the category and
   // overwrites is a no-op the second time. Only the notice is not, which is why the in-game path
   // guards it.
-  async applyClosureToDiscord(closed, { channel = null, playerNotice }) {
+  async applyClosureToDiscord(closed, { channel = null, playerNotice, staffNotice = null }) {
     if (closed.discord_channel_id) {
       await this.repository.enqueue({
         ticketId: closed.id,
@@ -1919,7 +2084,13 @@ export class HeimdallService {
     if (!ticketChannel) return null
     // Post before reapplying permissions: closing removes the author's access, so a notice sent
     // afterwards would land in a channel they can no longer see.
-    await ticketChannel.send({ content: playerNotice, allowedMentions: ALLOWED_MENTIONS })
+    //
+    // An in-game ticket's channel is staff-only by its overwrites, so the player-facing wording
+    // is addressed to nobody there. What staff need to know is who ended it and from where -
+    // every close runs through .ticket close, so without this the realm's own wording was the
+    // only wording, and a closure driven from Discord still read as "closed in game".
+    const notice = (closed.source === 'ingame' && staffNotice) ? staffNotice : playerNotice
+    await ticketChannel.send({ content: notice, allowedMentions: ALLOWED_MENTIONS })
     await this.refreshVisibility(ticketChannel, closed)
     return ticketChannel
   }
@@ -2188,14 +2359,33 @@ ${chunk}\`\`\``,
     // Recorded after the work rather than before, so a failure part-way through is retried in full
     // rather than skipped: a duplicate notice is cosmetic, a closure that never lands is the bug
     // this exists to fix.
-    if (await this.repository.hasAudit(ticket.id, 'ingame_closed')) return
+    //
+    // "Since the last reopen", not "ever". hasAudit answered the second question, so a ticket
+    // closed in game, reopened, and closed in game again matched on the FIRST closure's row and
+    // returned here - the second closure never reached Discord at all, and the channel sat open
+    // with no notice and no retention clock. Reopening starts a new life for every once-per-
+    // ticket guard.
+    if (await this.repository.hasAuditSinceReopen(ticket.id, 'ingame_closed')) return
+
+    // Every close runs through .ticket close, so the realm reports a Discord-driven closure and a
+    // console one identically. The audit row is what tells them apart: repository.close() writes
+    // ticket_closed, and only the Discord path calls it. When it is there, performClose has
+    // already posted the closure line and moved the channel - saying it again, in the realm's
+    // wording, is the "closed in game" complaint.
+    if (await this.repository.hasAuditSinceReopen(ticket.id, 'ticket_closed')) {
+      await this.repository.audit(ticket.id, 'ingame_closed', 'system',
+        { realmTag: payload.realmTag, sourceTicketId: payload.sourceTicketId, origin: 'discord' })
+      this.logger.info('Realm confirmed a closure that started in Discord; nothing more to say',
+        { ticket: ticket.public_key })
+      return
+    }
 
     const channel = await this.applyClosureToDiscord(ticket, {
       playerNotice: 'This ticket was closed in game and will disappear from your channel list. '
         + 'If you need anything else, open a new ticket from the panel.',
     })
     await this.repository.audit(ticket.id, 'ingame_closed', 'system',
-      { realmTag: payload.realmTag, sourceTicketId: payload.sourceTicketId })
+      { realmTag: payload.realmTag, sourceTicketId: payload.sourceTicketId, origin: 'realm' })
     this.logger.info('In-game ticket closed', { ticket: ticket.public_key, channel: channel?.id ?? 'none' })
   }
 

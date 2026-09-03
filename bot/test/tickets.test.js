@@ -825,8 +825,12 @@ test('a run that created nothing says so, instead of offering ids to paste', () 
 // The bug this exists for: closure side effects ran only via the bot's own performClose, so ANY
 // closure originating in game - a player abandoning their ticket, or a GM typing .ticket close at
 // the console - left the channel sitting in Open Tickets with no notice and no retention clock.
-function closureService({ status = 'closed', alreadyHandled = false } = {}) {
+// `history` is the ticket's audit trail in order, as action names. The fake resolves
+// hasAuditSinceReopen the way the SQL does - newest matching row against the newest reopen - so
+// the "since the last reopen" rule is actually exercised rather than stubbed to a boolean.
+function closureService({ status = 'closed', alreadyHandled = false, history = null } = {}) {
   const seen = { enqueued: [], sent: [], refreshed: [], audited: [] }
+  const trail = history ?? (alreadyHandled ? ['ingame_closed'] : [])
   const ticket = {
     id: 9, public_key: 'R1-9', source: 'ingame', source_ticket_id: 42, realm_tag: 'R1',
     status, discord_channel_id: 'chan-9', player_name: 'Dustpaw',
@@ -836,8 +840,13 @@ function closureService({ status = 'closed', alreadyHandled = false } = {}) {
   service.config = { closedChannelDeleteHours: 168, retentionDays: 180 }
   service.repository = {
     getIngameTicket: async () => ticket,
-    hasAudit: async () => alreadyHandled,
-    audit: async (...args) => { seen.audited.push(args) },
+    hasAudit: async (id, action) => trail.includes(action),
+    hasAuditSinceReopen: async (id, action) => {
+      const marked = trail.lastIndexOf(action)
+      if (marked === -1) return false
+      return marked > trail.lastIndexOf('ticket_reopened')
+    },
+    audit: async (...args) => { seen.audited.push(args); trail.push(args[1]) },
     enqueue: async (job) => { seen.enqueued.push(job) },
     ingameDescriptionSeen: async () => 1,
   }
@@ -846,7 +855,7 @@ function closureService({ status = 'closed', alreadyHandled = false } = {}) {
   service.ensureTicketChannel = async () => {
     assert.fail('a ticket that has ended must not have a channel built for it')
   }
-  return { service, seen, ticket }
+  return { service, seen, ticket, trail }
 }
 
 test('a ticket closed in game gets the same Discord treatment as one closed from Discord', async () => {
@@ -882,6 +891,39 @@ test('a second delivery for the same in-game closure changes nothing', async () 
   await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
   assert.deepEqual(seen.sent, [], 'the closing notice was posted twice')
   assert.deepEqual(seen.enqueued, [])
+})
+
+// Operator-caught, on the T12 plan: hasAudit answers "has this EVER happened", and every guard
+// built on it silently became permanent. A ticket can be closed, reopened and closed again, and
+// each of those closures is a first closure as far as Discord is concerned.
+test('a ticket closed in game, reopened, and closed in game again is handled both times', async () => {
+  const { service, seen } = closureService({ history: ['ingame_closed', 'ticket_reopened'] })
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
+
+  assert.equal(seen.sent.length, 1, 'the second in-game closure never reached Discord')
+  assert.match(seen.sent[0], /closed in game/)
+  assert.deepEqual(seen.refreshed, ['closed'], 'the channel stayed in Open Tickets after the second closure')
+  assert.ok(seen.enqueued.some((job) => job.kind === 'delete_channel'), 'the retention clock never restarted')
+})
+
+// The other half of the same mistake: a Discord close is confirmed by the realm moments later,
+// and that confirmation must not restate it in the realm's wording.
+test('a closure that started in Discord is not announced again as "closed in game"', async () => {
+  const { service, seen } = closureService({ history: ['ticket_closed'] })
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
+
+  assert.deepEqual(seen.sent, [], 'the realm confirmation posted a second, contradicting notice')
+  assert.equal(seen.audited[0][1], 'ingame_closed', 'the closure was not recorded as handled')
+  assert.equal(seen.audited[0][3].origin, 'discord', 'the origin of the closure was not recorded')
+})
+
+test('a Discord close, a reopen, then a real in-game close is announced as an in-game one', async () => {
+  const { service, seen } = closureService({ history: ['ticket_closed', 'ticket_reopened'] })
+  await service.syncIngameTicket({ realmTag: 'R1', sourceTicketId: 42, completed: 1, description: 'help' })
+
+  assert.equal(seen.sent.length, 1, 'a genuine in-game closure after a reopen said nothing')
+  assert.match(seen.sent[0], /closed in game/, 'it was still attributed to the earlier Discord close')
+  assert.equal(seen.audited[0][3].origin, 'realm')
 })
 
 test('a sync for a ticket that is still open closes nothing', async () => {
@@ -1191,24 +1233,38 @@ test('the identity toggle acts on re-read state, not the label it was rendered f
   // "Log Out Of Game" - but the GM has since logged out from another ticket. Acting on the label
   // would log out an identity that is already out; acting on re-read state logs it back in.
   const calls = []
+  const workSent = []
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }
   service.config = { adminRoleIds: ['role-admin'], staffRoleIds: ['role-staff'] }
   service.repository = {
     getTicket: async () => TOGGLE_TICKET,
     staff: async () => ({ gm_name: 'Helpbot' }),
-    getSetting: async () => 'offline', // what is true NOW
+    // Key-aware, because the work thread's id lives in this same table and a blanket answer
+    // would hand the thread lookup an identity state to fetch a channel by.
+    getSetting: async (key) => (key.startsWith('identity.state.') ? 'offline' : null), // what is true NOW
+    setSetting: async () => {},
+    getThreadId: async () => null,
   }
   service.setIdentityHeld = async (realmTag, ticketId, name, held) => { calls.push(held) }
   service.refreshTicketHeader = async () => {}
 
   const TOGGLE_TICKET = { id: 7, public_key: 'R1-7', source: 'ingame', realm_tag: 'R1', claimant_discord_user_id: '100', claimant_gm_name: 'Helpbot' }
+  const workThread = { id: 'work-7', archived: false, send: async (payload) => { workSent.push(payload.content) } }
+  const channel = {
+    id: 'chan-7', isThread: () => false,
+    send: async () => {},
+    threads: { create: async () => workThread },
+  }
+  service.client = { channels: { fetch: async () => workThread } }
+  let acknowledged = null
   const interaction = {
     customId: 'ticket:identity-toggle:7',
     user: { id: '100' },
     member: { roles: { cache: new Map([['role-staff', {}]]) } },
-    channel: null,
-    reply: async () => {},
+    channel,
+    deferUpdate: async () => { acknowledged = 'update' },
+    reply: async () => { acknowledged = 'reply' },
   }
   // Route through handleButton the way Discord would.
   const [, action] = interaction.customId.split(':')
@@ -1216,6 +1272,11 @@ test('the identity toggle acts on re-read state, not the label it was rendered f
   await service.handleButton(interaction).catch((error) => { throw error })
 
   assert.deepEqual(calls, [true], 'the toggle obeyed its stale label instead of the actual state')
+  assert.equal(acknowledged, 'update', 'a successful toggle still answered with a message of its own')
+  // The header carries the new identity state; what it cannot say is that this reaches every
+  // other ticket the same GM holds. That fact goes somewhere the whole team can see it.
+  assert.equal(workSent.length, 1, 'the identity change was not recorded for the rest of the staff')
+  assert.match(workSent[0], /is in game/)
 })
 
 test('an empty roster on an in-game ticket warns in the channel, since there is no thread to join', async () => {
