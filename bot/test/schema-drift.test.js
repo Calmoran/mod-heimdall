@@ -1,8 +1,8 @@
-// The schema exists in two places on purpose: deploy/heimdall-schema.sql is what an operator reads
-// and what the migration moves, and src/mod_heimdall_schema_ddl.h is the copy the module runs at
-// startup. Two copies drift unless something checks, and a module that creates tables the .sql
-// does not describe is the kind of mismatch nobody notices until a fresh install behaves
-// differently from a migrated one. So this reads both and fails when they differ by a byte.
+// The schema exists in two places on purpose: deploy/heimdall-schema.sql is what an operator
+// reads, and src/mod_heimdall_schema_ddl.h is the copy the module runs at startup. Two copies
+// drift unless something checks, and a module that creates tables the .sql does not describe is
+// the kind of mismatch nobody notices until an install behaves unlike its own documentation. So
+// this reads both and fails when they differ by a byte.
 //
 // The same goes for the list of table names: the qualifier rewrites exactly the names in its
 // TABLES array, and diagnose counts exactly the ones in its own. A table added to the .sql and

@@ -94,7 +94,7 @@ export function loadConfig(env = process.env) {
   // Folding them in SILENTLY was the gap: nothing told an operator they were on the old shape, so
   // they found out by reading a CHANGELOG, or never. Each legacy variable still set is collected
   // here and warned about once at startup, naming its replacement and saying it is still honoured -
-  // so the migration happens when it suits them rather than during an outage, and a maintainer can
+  // so the change happens when it suits them rather than during an outage, and a maintainer can
   // tell from a pasted log how many installs still carry the old configuration.
   //
   // Collected rather than logged, because configuration is read before there is a logger to read

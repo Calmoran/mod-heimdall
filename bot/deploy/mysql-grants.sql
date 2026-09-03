@@ -1,5 +1,5 @@
 -- The bot's MySQL account. Replace the password before use and run this as a database
--- administrator, after deploy/create-heimdall-database.sql (or the migration) has created the
+-- administrator, after deploy/create-heimdall-database.sql has created the
 -- database.
 --
 -- The account is granted Heimdall's own database and nothing else. It never connects to a realm

@@ -79,8 +79,7 @@ inline std::string Q(std::string_view sql)
 // Creates Heimdall's tables in Heimdall.Database on the characters connection if they are not
 // there yet, and records the schema version in heimdall_setting. Returns false, with the reason
 // already logged, when the module must not run: the database is unreachable, a table could not be
-// created, or a 1.x install still has its tables in the characters database and has not been
-// migrated (deploy/migrate-to-heimdall-db.sql).
+// created, or the database is stamped with a schema version newer than this module knows.
 bool EnsureSchema();
 
 // The DDL the module runs, verbatim from deploy/heimdall-schema.sql (test/schema_drift.test.js

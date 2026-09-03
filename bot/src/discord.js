@@ -1228,7 +1228,7 @@ export class HeimdallService {
 
   // Stored id first, marker scan second, nothing third. The scan is recovery, not the mechanism:
   // it covers a lost setting and it covers the upgrade, where every open ticket still carries a
-  // 1.x embed header that was never given an id.
+  // pre-2.0 embed header that was never given an id.
   async resolveHeader(surface, ticket, which = 'staff') {
     if (!surface) return { message: null, legacy: false }
     const storedId = await this.repository.getHeaderId(ticket.id, which).catch(() => null)
@@ -1248,7 +1248,7 @@ export class HeimdallService {
       return { message: mine, legacy: false }
     }
 
-    // A 1.x header. Its embed cannot be edited into a V2 layout without clearing the embed, and
+    // A pre-2.0 header. Its embed cannot be edited into a V2 layout without clearing the embed, and
     // the change is one-way either way, so it is replaced rather than converted - which is also
     // the only way it gains a stored id.
     const legacy = messages.find((message) => message.author.id === this.client.user.id
@@ -1263,7 +1263,7 @@ export class HeimdallService {
     return legacy ? null : message
   }
 
-  // Posts a header only where there is none, and replaces a 1.x one where there is.
+  // Posts a header only where there is none, and replaces a pre-2.0 one where there is.
   //
   // "Is there a header already" and "is there a header I can use" are not the same question after
   // the upgrade, and answering the first with the second put a V2 header in the channel BESIDE the
@@ -1316,7 +1316,7 @@ export class HeimdallService {
     })
   }
 
-  // Redraws a header in place, replacing a 1.x embed header with the new layout the first time it
+  // Redraws a header in place, replacing a pre-2.0 embed header with the new layout the first time it
   // is reached. The body no longer travels in the message it is drawn into - it is read from the
   // events every time - so a redraw cannot lose it, and a header that has to be reposted comes
   // back complete rather than blank.

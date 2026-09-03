@@ -3,7 +3,7 @@
 
 // deploy/heimdall-schema.sql, embedded. The module runs this at startup (mod_heimdall_schema.cpp)
 // so a new install needs no manual SQL, and ships the .sql file as the readable copy for operators
-// and for the migration script. The two must stay identical: bot/test/schema-drift.test.js reads
+// for an operator to read. The two must stay identical: bot/test/schema-drift.test.js reads
 // both and fails when they differ, so edit the .sql and paste it here, never the other way round.
 // Every table name is bare; Qualify() puts the database in front of each one at runtime.
 

@@ -1,6 +1,6 @@
 -- Creates the database Heimdall keeps its tables in and lets the core reach it. Run once, as a
 -- MySQL administrator, before the first start of a worldserver with Heimdall 2.x. New installs
--- only; an existing 1.x install runs migrate-to-heimdall-db.sql instead, which includes this.
+-- 2.0.0 is a fresh-install release; there is no upgrade path from 1.x.
 --
 -- Replace the two placeholders:
 --   heimdall            the database name - must match Heimdall.Database in heimdall.conf

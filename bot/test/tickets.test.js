@@ -1917,7 +1917,7 @@ test('a header is never mistaken for another ticket whose key it starts with', a
   assert.equal(found.message, null, 'R1-14 adopted R1-147\'s header')
 })
 
-test('a 1.x embed header is reported as legacy rather than returned as the header', async () => {
+test('a pre-2.0 embed header is reported as legacy rather than returned as the header', async () => {
   const legacy = { id: 'm-4', author: { id: 'bot' }, embeds: [{ title: 'R1-7' }], components: [] }
   const { service, surface } = resolveService({ messages: [legacy] })
   const found = await service.resolveHeader(surface, { id: 7, public_key: 'R1-7' })
@@ -1933,7 +1933,7 @@ test('a legacy header is replaced by the new layout, and the old one is removed'
 
   assert.equal(replacement.id, 'm-new')
   assert.equal(stored.get('7:staff'), 'm-new', 'the replacement header was posted without remembering its id')
-  assert.equal(legacy.deleted, true, 'the 1.x header was left behind beside its replacement')
+  assert.equal(legacy.deleted, true, 'the pre-2.0 header was left behind beside its replacement')
 })
 
 test('a header whose text has not changed is not edited at all', async () => {
@@ -2364,9 +2364,9 @@ test('a redraw identical in both text and controls is still skipped', async () =
 
 // "Is there a header already" and "is there a header I can use" are different questions after the
 // upgrade. Answering the first with the second put a new V2 header in the channel BESIDE the
-// surviving 1.x embed - two headers on every open ticket that resynced before it next changed
+// surviving pre-2.0 embed - two headers on every open ticket that resynced before it next changed
 // state, one of them frozen and wrong.
-test('a resync during the upgrade replaces the 1.x header instead of posting beside it', async () => {
+test('a resync into a guild that ran an older Heimdall replaces its header instead of posting beside it', async () => {
   // headerService's bot is 'bot-user'; a mismatch here silently makes the legacy header invisible.
   const legacy = { id: 'old', author: { id: 'bot-user' }, embeds: [{ title: 'R1-5' }], components: [], delete: async () => { legacy.deleted = true } }
   const { service, sent, ticket, channel, headerIds } = headerService({ source: 'ingame' })
@@ -2378,7 +2378,7 @@ test('a resync during the upgrade replaces the 1.x header instead of posting bes
 
   assert.equal(sent.channel.filter((payload) => v2ActionRows(payload).length).length, 1,
     'the upgrade left two headers in the channel')
-  assert.equal(legacy.deleted, true, 'the 1.x header was left sitting above its replacement')
+  assert.equal(legacy.deleted, true, 'the pre-2.0 header was left sitting above its replacement')
   assert.ok(headerIds.get('5:staff'), 'the replacement was posted without remembering its id')
 })
 
@@ -2473,7 +2473,7 @@ test('the mode governs in-game tickets and never Discord-native ones', async () 
   }
 })
 
-// Forward-only. Switching is a decision about what happens next, not a migration.
+// Forward-only. Switching is a decision about what happens next, not a retrospective move.
 test('switching to merged leaves an existing work thread alone and writes to the channel', async () => {
   const service = Object.create(HeimdallService.prototype)
   service.logger = { error: () => {}, warn: () => {}, info: () => {} }

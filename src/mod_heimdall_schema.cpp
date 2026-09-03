@@ -5,11 +5,6 @@
 // MySQL account can be granted that database and nothing else. So the module carries its DDL
 // (mod_heimdall_schema_ddl.h, a verbatim copy of deploy/heimdall-schema.sql) and runs it at
 // startup on the core's characters connection, qualifying every table name with the database.
-//
-// Before it creates anything it looks for a 1.x install's tables in the characters database. If
-// they are there and the new database is empty, this is an un-migrated upgrade and the module
-// refuses to start: creating fresh tables next to the old ones would leave the operator with two
-// sets and every existing ticket in the wrong one. deploy/migrate-to-heimdall-db.sql moves them.
 
 #include "DatabaseEnv.h"
 #include "Log.h"
@@ -44,9 +39,9 @@ std::string TableNameList()
     return list;
 }
 
-// How many of Heimdall's tables exist in `schemaExpr`, which is either a quoted database name or
-// the DATABASE() function. These queries name the tables inside string literals, which Qualify()
-// leaves alone, so the whole statement can go straight to the connection.
+// How many of Heimdall's tables exist in `schemaExpr`, a quoted database name. This query names
+// the tables inside string literals, which Qualify() leaves alone, so the whole statement can go
+// straight to the connection.
 uint32 CountTables(std::string const& schemaExpr)
 {
     QueryResult result = CharacterDatabase.Query(
@@ -84,24 +79,9 @@ bool EnsureSchema()
         return false;
     }
 
-    uint32 const inCharacters = CountTables("DATABASE()");
-    uint32 const inHeimdall = CountTables(quotedDatabase);
-
-    if (inCharacters > 0 && inHeimdall == 0)
-    {
-        LOG_ERROR(LOG_FILTER, "Found {} Heimdall table(s) in the characters database and none in `{}`. This is a "
-            "Heimdall 1.x install that has not been migrated. Nothing has been created or changed. Stop the "
-            "worldserver and run deploy/migrate-to-heimdall-db.sql, which moves the tables and their data with "
-            "RENAME TABLE, then start again. Bridge disabled.", inCharacters, database);
-        return false;
-    }
-
-    if (inCharacters > 0)
-    {
-        LOG_WARN(LOG_FILTER, "{} Heimdall table(s) still exist in the characters database alongside the live "
-            "ones in `{}`. The module ignores them. If they are leftovers from a migration or a rollback, "
-            "check they hold nothing you need and drop them.", inCharacters, database);
-    }
+    // Counted before the DDL runs, so the startup line below can say whether this start created
+    // the tables or found them already there.
+    uint32 const existing = CountTables(quotedDatabase);
 
     // Statement by statement: the connection is not opened for multi-statement queries, and the
     // splitter drops the comment lines first (test/qualify_test.cpp checks it yields exactly the
@@ -139,7 +119,7 @@ bool EnsureSchema()
     }
 
     LOG_INFO(LOG_FILTER, "Heimdall schema ready in `{}`: {} tables, schema version {} ({}).",
-        database, present, SCHEMA_VERSION, inHeimdall == 0 ? "created on this start" : "already present");
+        database, present, SCHEMA_VERSION, existing == 0 ? "created on this start" : "already present");
     return true;
 }
 }
