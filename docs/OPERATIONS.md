@@ -17,12 +17,88 @@ must be sent in-game. Use **Add Note** for facts staff should retain - a note is
 attached to the player's game account and appears on every future ticket that
 account opens.
 
-Where staff discussion belongs depends on who opened the ticket. An in-game
-ticket's channel is staff-only by its permissions, because the player has no
-Discord account in the room, so staff work directly in the channel and there is
-no thread. A Discord-opened ticket's reporter *is* in the channel, so everything
-staff-facing lives in a private thread they cannot see - never move that
-discussion into the channel, because they read it.
+Where staff discussion belongs depends on who opened the ticket. A Discord-opened
+ticket's reporter *is* in the channel, so everything staff-facing lives in a
+private thread they cannot see - never move that discussion into the channel,
+because they read it. An in-game ticket's channel is staff-only by its
+permissions, because the player has no Discord account in the room, but it gets a
+work thread of its own anyway. See "What goes where" below.
+
+## What the ticket card looks like
+
+The header is one message made of two boxes. The top box is the ticket: its
+number, who opened it and when, then the text they wrote, with the stronger
+accent colour. The bottom box is the player - character, level, zone, whether
+they are online right now, whether the GM identity is in the world, their ticket
+history, and any notes on their account - with the controls underneath in working
+order: claim it, talk to them, be in the game, close it.
+
+Discord caps the whole message at 4,000 characters. When there is more to show
+than that, Heimdall drops notes first, then history, then the player's
+background, and truncates the ticket text last of all. **It always says what it
+left out**, in small print at the bottom of the player box - "40 notes are not
+shown here" means the notes are on the account, not lost.
+
+Headers written by 1.x are replaced with this layout the first time the ticket
+changes state, or immediately if you run `/ticket refresh`.
+
+## What goes where
+
+The ticket channel is the **conversation** and nothing else: the player's
+messages, and the GM's replies under the identity's own name, in order. Each
+reply carries a small line underneath saying whether the player was online when
+it was sent, or that it is waiting for them to log in. If Heimdall eventually
+gives up on delivering one, that line changes to say so - a reply you can see in
+the channel is never quietly one that never arrived.
+
+Everything else - notes, GM actions, identity changes, reopen notices - goes to
+the ticket's **work thread**, so the conversation stays readable as a record. A
+Discord-opened ticket uses its existing private staff thread. An in-game ticket
+gets a thread named `work-<ticket>` under its channel; that channel is already
+staff-only, so the thread is too, and nobody has to be added to it.
+
+## Buttons no longer answer back
+
+A button press that works changes the card, or posts in the channel, and says
+nothing else. There is no "Claimed." or "Note saved." popup, because whatever it
+would have told you has already happened in front of you. What still speaks:
+
+- **errors**, always, and only to the person who pressed the button;
+- the **Close** confirmation, because a closed ticket cannot be un-closed by
+  pressing the same button again.
+
+If a press seems to have done nothing, read the card and the channel before
+looking for a message.
+
+## Who may do what, to whose ticket
+
+Acting on a **player** belongs to the GM handling the ticket. Administering the
+**ticket** belongs to administrators.
+
+| Action | Who |
+|---|---|
+| Reply to Player | the claiming GM only |
+| Revive, Unstuck, Combat stop, Teleport, Kick | the claiming GM only |
+| Log In / Out Of Game | the claiming GM only |
+| Close | an administrator, or the claiming GM |
+| Reopen, Reassign, Grant | an administrator |
+| Refresh Player Info, `/ticket refresh` | any staff member |
+| Add Note, Remove Note | any rostered staff member |
+
+An administrator who needs to act on a player through somebody else's ticket
+takes the ticket first with `/ticket reassign`, which leaves a record of the
+handover; the refusal message says so. Logging a GM identity in or out counts as
+acting on a player rather than as administration, because it puts that character
+in the world - visible, whisperable and answerable - across every ticket that GM
+holds at once.
+
+## Reading a closed ticket without reopening it
+
+`/ticket grant <ticket_id> <user>` (administrators) gives one rostered staff
+member access to a closed ticket's channel. Reopening used to be the only way to
+do that, and it clears the claim and puts the ticket back in the pool - far too
+much just so somebody can read. The access lasts until the channel is deleted by
+the closed-channel clock below.
 
 ## Retention
 

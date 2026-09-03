@@ -53,7 +53,7 @@ Heimdall does not work at all without these:
 - View Channels — otherwise it cannot see ticket channels
 - Send Messages — no ticket header, no replies, no queue board
 - Read Message History — headers and the panel cannot be found again, so they are reposted or lost
-- Embed Links — every header and the queue board are embeds and will not post
+- Embed Links — the ticket panel and the queue board are embeds and will not post
 - Manage Channels — ticket channels and categories cannot be created, moved or deleted
 - Manage Permissions — per-ticket visibility cannot be applied, so tickets may be readable by the
   wrong people

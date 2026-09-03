@@ -106,7 +106,7 @@ export const REQUIRED_PERMISSIONS = [
   { flag: PermissionFlagsBits.ReadMessageHistory, name: 'Read Message History', fatal: true,
     breaks: 'headers and the panel cannot be found again, so they are reposted or lost' },
   { flag: PermissionFlagsBits.EmbedLinks, name: 'Embed Links', fatal: true,
-    breaks: 'every header and the queue board are embeds and will not post' },
+    breaks: 'the ticket panel and the queue board are embeds and will not post' },
   { flag: PermissionFlagsBits.ManageChannels, name: 'Manage Channels', fatal: true,
     breaks: 'ticket channels and categories cannot be created, moved or deleted' },
   { flag: PermissionFlagsBits.ManageRoles, name: 'Manage Permissions', fatal: true,

@@ -5,10 +5,74 @@ repository, and each prints the version in its startup line.
 
 ## 2.0.0 — 2026-09-02
 
-Heimdall's tables leave the realm's characters database. This is a major version because the move
-is a one-time migration on every existing install, and because it changes the one sentence that
-matters most about the bot: **the bot never connects to a realm database. Its database contains
-Heimdall's own tables and nothing else.**
+Heimdall's tables leave the realm's characters database, and the ticket channel is rebuilt around
+what a GM actually does in it. This is a major version because the move is a one-time migration on
+every existing install, because it changes the one sentence that matters most about the bot - **the
+bot never connects to a realm database. Its database contains Heimdall's own tables and nothing
+else** - and because staff will find the interface behaves differently on the first ticket after
+the upgrade.
+
+### The ticket channel, if you are coming from 1.x
+
+Nothing here needs configuring. It is written down because your staff will notice all of it.
+
+- **The card is two boxes now, not one embed.** The ticket - its number, who opened it, and what
+  they wrote - is on top in the stronger colour, because that is what you open the channel to
+  read. The player, their history, their notes and the controls are underneath. Discord caps the
+  message at 4,000 characters, so a very long ticket with a talkative account drops notes first,
+  then history, then the player's background, and truncates the ticket text last - **and it always
+  prints what it left out**. Nothing is hidden silently.
+
+  Headers written by 1.x stay as they are until the ticket next changes state, then they are
+  replaced. `/ticket refresh` does it immediately.
+
+- **Successful button presses no longer say anything.** Claim, Reply, the identity toggle, Add
+  Note, Remove Note, Refresh, the GM actions and Reopen used to each answer with a private message
+  repeating what the card was about to show. They now just change the card. Errors are still
+  private messages, and Close still asks for confirmation first, because closing is destructive.
+  If a press looks like it did nothing, read the card.
+
+- **The GM's replies are in the channel.** The channel used to say only "X replied in game", so
+  half of every conversation was missing from the one place you would look for it. The words are
+  now posted under the GM identity's name, beside the player's, with a line underneath saying
+  whether the player was online when it was sent or whether it is waiting for them to log in. If
+  Heimdall gives up on delivering one, that line is corrected to say so.
+
+- **Staff chatter moved off the conversation.** Notes, GM-action lines, identity changes and
+  reopen notices go to the ticket's work thread. A Discord-opened ticket uses the private staff
+  thread it already had. An in-game ticket gets a `work-<ticket>` thread under its channel - the
+  channel is already staff-only, so the thread is too, and nobody needs adding to it. Threads do
+  not count against Discord's channel limits.
+
+- **The player card actually refreshes.** "Refresh Player Info" never redrew anything: the module
+  wrote a new snapshot within a second and nothing repainted, which is also why a player who had
+  logged out could still read as online a quarter of an hour later. The card now redraws itself
+  when the snapshot changes, and `Heimdall.ContextRefreshSeconds` **defaults to 15 instead of 60**.
+  A sweep that finds nothing changed queues nothing, so this costs a query per open ticket rather
+  than Discord traffic. An existing `heimdall.conf` keeps whatever value it already states - change
+  it yourself if you want the new pace.
+
+- **A closure driven from Discord says so.** Every close runs through the realm's `.ticket close`,
+  so the channel reported all of them as "closed in game", including the one a GM had just clicked.
+  It now reads "Closed by *GM* from Discord", and the realm's confirmation no longer posts a second
+  notice contradicting the first.
+
+- **Administrators can no longer act on a player through someone else's ticket.** This one is a
+  behaviour change an admin will hit within a day. Revive, Unstuck, Combat stop, Teleport, Kick and
+  the in-game identity toggle are now the claiming GM's alone - exactly as replying to the player
+  always was. Close, Reopen, Reassign and the new Grant stay with administrators. An admin who
+  needs to act takes the ticket with `/ticket reassign` first, which leaves a record of the
+  handover; the refusal message says so.
+
+  Identity is included deliberately: logging a GM's character in or out puts it in the world,
+  visible and answerable, across every ticket that GM holds - not just the one being looked at.
+
+- **`/ticket grant <ticket_id> <user>`** (administrators) lets one rostered GM read a closed ticket
+  without reopening it. Reopening was previously the only way, and it clears the claim and puts the
+  ticket back in the pool - far too much just so somebody can read.
+
+- **Notes show the GM's name**, not a Discord mention that rendered as a blue pill mid-sentence
+  and, once that account had left the server, as a bare numeric id.
 
 ### Changed
 
