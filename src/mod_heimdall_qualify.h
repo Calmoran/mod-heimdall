@@ -18,9 +18,66 @@
 #include <array>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace Heimdall::Sql
 {
+// Splits a DDL script into the statements the core can run one at a time (its connection does
+// not accept multi-statement queries). Comment lines are dropped first: deploy/heimdall-schema.sql
+// has a `;` inside a comment, and splitting the raw text on `;` cut the first CREATE TABLE in
+// half - MySQL answered with a parse error "near '' at line 11" and the worldserver aborted. The
+// DDL uses full-line `--` comments only, so that is what is recognised.
+inline std::vector<std::string> SplitStatements(std::string_view script)
+{
+    auto const trimmed = [](std::string const& s) -> std::string
+    {
+        std::size_t const first = s.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            return std::string();
+        std::size_t const last = s.find_last_not_of(" \t\r\n");
+        return s.substr(first, last - first + 1);
+    };
+
+    std::vector<std::string> statements;
+    std::string current;
+    auto const flush = [&]()
+    {
+        std::string const statement = trimmed(current);
+        if (!statement.empty())
+            statements.push_back(statement);
+        current.clear();
+    };
+
+    while (!script.empty())
+    {
+        std::size_t const eol = script.find('\n');
+        std::string_view line = script.substr(0, eol);
+        script = eol == std::string_view::npos ? std::string_view() : script.substr(eol + 1);
+
+        std::size_t const first = line.find_first_not_of(" \t\r");
+        if (first == std::string_view::npos || line.substr(first, 2) == "--")
+            continue;
+
+        std::size_t start = 0;
+        while (true)
+        {
+            std::size_t const semicolon = line.find(';', start);
+            if (semicolon == std::string_view::npos)
+            {
+                current.append(line.substr(start));
+                current.push_back('\n');
+                break;
+            }
+            current.append(line.substr(start, semicolon - start));
+            flush();
+            start = semicolon + 1;
+        }
+    }
+    flush();
+
+    return statements;
+}
+
 constexpr std::array<std::string_view, 7> TABLES = {
     "heimdall_ticket",
     "heimdall_event",

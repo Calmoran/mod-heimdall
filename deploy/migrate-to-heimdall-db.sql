@@ -5,7 +5,10 @@
 -- Replace the placeholders before running:
 --   acore_characters       the realm's characters database
 --   heimdall               the new database - must match Heimdall.Database in heimdall.conf
---   'acore'@'localhost'    the account the core's worldserver connects with
+--   'acore'@'localhost'    the account the core's worldserver connects with - the user in
+--                          CharacterDatabaseInfo, with the host MySQL sees it from. A core that
+--                          connects over TCP to 127.0.0.1 matches the '127.0.0.1' account, not
+--                          'localhost'; SELECT user, host FROM mysql.user shows what exists.
 --   'heimdall_bot'@...     the bot's account(s), as created by bot/deploy/mysql-grants.sql
 --
 -- What it does:

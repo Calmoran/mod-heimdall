@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -164,6 +165,42 @@ int main()
     Expect("REFERENCES with no space before the column list",
            Qualify("REFERENCES heimdall_ticket(id) ON DELETE CASCADE", "heimdall"),
            "REFERENCES `heimdall`.`heimdall_ticket`(id) ON DELETE CASCADE");
+
+    // The statement splitter the module feeds the DDL through. A `;` inside a comment line must
+    // not end a statement: the real schema has one, and splitting on it cut the first CREATE
+    // TABLE in half on a real worldserver (parse error "near '' at line 11", process aborted).
+    {
+        using Heimdall::Sql::SplitStatements;
+
+        std::vector<std::string> const parts = SplitStatements(
+            "-- a note; with a semicolon\n"
+            "CREATE TABLE a (\n"
+            "  -- another; here\n"
+            "  x INT\n"
+            ");\n"
+            "\n"
+            "CREATE TABLE b (y INT); CREATE TABLE c (z INT)\n");
+        ExpectBool("split: three statements", parts.size() == 3, true);
+        if (parts.size() == 3)
+        {
+            Expect("split: comment lines dropped, statement kept whole", parts[0], "CREATE TABLE a (\n  x INT\n)");
+            Expect("split: two statements on one line", parts[1], "CREATE TABLE b (y INT)");
+            Expect("split: trailing statement without a semicolon", parts[2], "CREATE TABLE c (z INT)");
+        }
+        ExpectBool("split: empty input", SplitStatements("").empty(), true);
+        ExpectBool("split: comments only", SplitStatements("-- x;\n  -- y;\n").empty(), true);
+
+        std::vector<std::string> const real = SplitStatements(Heimdall::Sql::SCHEMA_DDL);
+        ExpectBool("ddl split: exactly seven statements", real.size() == Heimdall::Sql::TABLES.size(), true);
+        for (std::size_t i = 0; i < real.size() && i < Heimdall::Sql::TABLES.size(); ++i)
+        {
+            std::string const head = "CREATE TABLE IF NOT EXISTS " + std::string(Heimdall::Sql::TABLES[i]) + " (";
+            Expect("ddl split: statement starts with its CREATE TABLE", real[i].substr(0, head.size()), head);
+            ExpectCount("ddl split: no comment text inside a statement", real[i], "--", 0);
+            ExpectCount("ddl split: no semicolon inside a statement", real[i], ";", 0);
+            ExpectCount("ddl split: statement ends with the engine clause", real[i], ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4", 1);
+        }
+    }
 
     // The database-name validator, which is what keeps the conf value from becoming SQL.
     ExpectBool("valid: heimdall", IsValidDatabaseName("heimdall"), true);

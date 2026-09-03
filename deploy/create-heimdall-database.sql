@@ -5,7 +5,9 @@
 -- Replace the two placeholders:
 --   heimdall            the database name - must match Heimdall.Database in heimdall.conf
 --   'acore'@'localhost' the account the core's worldserver connects with (the user in
---                       CharacterDatabaseInfo in worldserver.conf)
+--                       CharacterDatabaseInfo in worldserver.conf, with the host MySQL sees it
+--                       from - over TCP to 127.0.0.1 that is the '127.0.0.1' account, not
+--                       'localhost'; SELECT user, host FROM mysql.user shows what exists)
 --
 -- The module creates its own tables at startup on the core's connection, so the core's account
 -- needs the right to create tables here. Nothing else does: the bot's account is set up by

@@ -103,20 +103,11 @@ bool EnsureSchema()
             "check they hold nothing you need and drop them.", inCharacters, database);
     }
 
-    // Statement by statement: the connection is not opened for multi-statement queries. Each
-    // chunk is a CREATE TABLE IF NOT EXISTS with the comments above it, which MySQL discards.
-    std::string_view ddl = Sql::SCHEMA_DDL;
-    while (!ddl.empty())
-    {
-        std::size_t const end = ddl.find(';');
-        std::string_view statement = ddl.substr(0, end);
-        ddl = end == std::string_view::npos ? std::string_view() : ddl.substr(end + 1);
-
-        if (statement.find("CREATE TABLE") == std::string_view::npos)
-            continue;
-
+    // Statement by statement: the connection is not opened for multi-statement queries, and the
+    // splitter drops the comment lines first (test/qualify_test.cpp checks it yields exactly the
+    // seven CREATE TABLE statements from the real DDL).
+    for (std::string const& statement : Sql::SplitStatements(Sql::SCHEMA_DDL))
         CharacterDatabase.DirectExecute(Q(statement));
-    }
 
     uint32 const present = CountTables(quotedDatabase);
     if (present != Sql::TABLES.size())
