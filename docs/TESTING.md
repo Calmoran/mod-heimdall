@@ -1,6 +1,9 @@
 # Test and release checklist
 
-Run `npm test` and `npm run check` before every release. `npm test` includes a smoke test that
+Run `npm test` and `npm run check` before every release, and build and run
+`test/qualify_test.cpp` (`core-build.yml` does, with `-Wall -Wextra -Werror`) whenever the SQL
+qualifier or the schema changes. `npm test` also fails when the DDL compiled into the module
+differs from `deploy/heimdall-schema.sql`. `npm test` includes a smoke test that
 launches the bot as a real process and waits for its startup line, because a release once shipped a
 bot that could not start at all: every other test exercised the service without ever running the
 program.
@@ -10,7 +13,15 @@ empty directory, `npm ci --omit=dev`, and start the bot against a test guild. A 
 hold files the tag does not. Then use a separate
 Discord guild and development realm to verify the following:
 
-- Module config and SQL load; no query writes to `gm_ticket` occur.
+- Module config and SQL load; no query writes to `gm_ticket` occur. The module's startup line
+  reads `Heimdall schema ready in `heimdall`: 7 tables` and every table it created is in
+  `Heimdall.Database`, none in the characters database.
+- The bot's MySQL account is denied the realm: as that account, `SELECT COUNT(*) FROM
+  <characters>.characters` fails with `ERROR 1142`, and `SHOW DATABASES` lists Heimdall's
+  database and no realm database. Quote the error in the release notes; a claim about a boundary
+  is worth exactly what its denial proof is.
+- A 1.x install migrates with `deploy/migrate-to-heimdall-db.sql` to identical row counts in
+  every table, and the ticket lifecycle then runs against the moved rows.
 - Repeated polls and bot restarts do not create duplicate channels, events, or
   player messages.
 - A temporary failure of a queued realm command is leased, retried, and

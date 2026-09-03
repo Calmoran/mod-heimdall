@@ -20,7 +20,11 @@ stock `OnPlayerCanUseChat` hook.
 
 ## The bot's half, and the seam between them
 
-The module and bot share only module-owned records in the Characters database.
+The module and bot share only module-owned records, in a database of Heimdall's own
+(`Heimdall.Database`, default `heimdall`) on the realm's MySQL server. The module addresses it by
+name from the core's characters connection - every query is schema-qualified at the call site - so
+the realm's databases are never where its tables live, and the bot's account never has to be able
+to see them.
 The design avoids a public listener and keeps external integration separate:
 
 ```text
@@ -35,8 +39,10 @@ the core's own command handlers, inside the world thread. The module composes ev
 from a fixed set of actions, so a row cannot express a command Heimdall does not perform - a
 poisoned row names an action that does not exist, and is refused.
 
-That is why the bot has no channel to the realm other than its database account, and why
-`deploy/mysql-grants.sql` - seven tables, no DDL, loopback only - is the whole of its access.
+That is why the bot has no channel to the realm other than its database account, and why that
+account is granted Heimdall's database and nothing else - `bot/deploy/mysql-grants.sql`, no DDL,
+loopback only. The bot never connects to a realm database. Its database contains Heimdall's own
+tables and nothing else.
 
 Tables use the `heimdall_` prefix:
 

@@ -22,20 +22,27 @@
    ```
 
    Confirm it worked before building: the configure output should list `mod-heimdall`, and the generated `modules/gen_scriptloader/static/ModulesLoader.cpp` in your build tree should call `Addmod_heimdallScripts()`. A module the build does not discover produces no error at all - it simply is not there.
-4. The database schema installs itself. When the worldserver (or `dbimport`) starts with the
-   module built in and `Updates.EnableDatabases` covering the Characters database — the shipped
-   default is all databases — AzerothCore's updater finds
-   `data/sql/db-characters/base/heimdall.sql`, applies it, and records it in the `updates` table
-   like any other module's SQL. It creates seven tables named `heimdall_*` and touches nothing
-   else; running into an existing install is safe.
-
-   **Manual fallback, only if you run with the updater disabled** (`Updates.EnableDatabases = 0`):
-   apply the file yourself during a maintenance window, with a backup first. The connection details
-   are in your `worldserver.conf` under `CharacterDatabaseInfo`:
+4. Create Heimdall's database. The module keeps its seven tables in a database of their own, on
+   the same MySQL server as the realm, named by `Heimdall.Database` in `heimdall.conf` (default
+   `heimdall`). It has to exist, and the core's own MySQL user needs full rights on it, before the
+   worldserver starts. `deploy/create-heimdall-database.sql` does both: replace the placeholders
+   and run it as a MySQL administrator.
 
    ```
-   mysql -h <host> -P <port> -u <user> -p <characters_database> < data/sql/db-characters/base/heimdall.sql
+   mysql -h <host> -P <port> -u root -p < deploy/create-heimdall-database.sql
    ```
+
+   The tables install themselves. On startup the module checks that the database is there and
+   creates whatever is missing from `deploy/heimdall-schema.sql` - the same file, compiled into the
+   binary - then records its schema version in `heimdall_setting`. It creates seven tables named
+   `heimdall_*` and touches nothing else; starting into an existing install is safe. AzerothCore's
+   updater is not involved, so the `Updates.*` settings do not matter here, and the file can be
+   read, or applied by hand, without any of that.
+
+   If the database is missing or the core's user cannot see it, the module logs
+   `Database `heimdall` does not exist, or the core's MySQL user has no rights on it` and disables
+   itself; the realm starts normally without it. Coming from 1.x, where the tables lived in the
+   characters database, read "Upgrading from 1.x" below before starting the new worldserver.
 
 5. Copy `conf/heimdall.conf.dist` to the server's module configuration directory as `heimdall.conf`.
 
@@ -93,9 +100,9 @@
    player can both notice a staff reply and trust who sent it; turn it off only for an in-character
    support desk.
 7. Install the bot from this same clone's `bot/` directory, following
-   [INSTALL-bot.md](INSTALL-bot.md). Give its MySQL account privileges only on tables named
-   `heimdall_%`. There is no second repository: the two halves version together and a single
-   `git pull` updates both.
+   [INSTALL-bot.md](INSTALL-bot.md). Its MySQL account is granted Heimdall's database and nothing
+   else (`bot/deploy/mysql-grants.sql`); it never connects to a realm database. There is no second
+   repository: the two halves version together and a single `git pull` updates both.
 
 The module only reads `gm_ticket`. Every in-game lifecycle change goes through documented AzerothCore GM commands, which the module runs itself inside the worldserver from a queued intent row; never grant the bot write access to `gm_ticket`.
 
@@ -103,7 +110,39 @@ Set `Heimdall.ArchiveRetentionDays` to the same value as the companion
 bot's `TRANSCRIPT_RETENTION_DAYS` so an in-game ticket that the player closes in
 the game receives the same retention treatment.
 
-Rollback: set `Heimdall.Enabled = 0`, stop the companion bot, and restart the worldserver during maintenance. Keep the module tables for audit and rollback unless the operator explicitly decides to remove them after a backup.
+Rollback: set `Heimdall.Enabled = 0`, stop the companion bot, and restart the worldserver during maintenance. Keep Heimdall's database for audit and rollback unless the operator explicitly decides to remove it after a backup.
+
+## Upgrading from 1.x
+
+2.0.0 moves Heimdall's tables out of the realm's characters database and into a database of their
+own. The move is a single `RENAME TABLE`: no rows are copied, ids and foreign keys survive, and it
+takes as long as a metadata change takes. In order:
+
+1. Stop the bot and the worldserver. Back up the characters database.
+2. Open `deploy/migrate-to-heimdall-db.sql` and replace the placeholders: the characters database
+   name, the new database name (the value of `Heimdall.Database`; `heimdall` unless you change
+   it), the core's MySQL user, and the bot's accounts. Run it as a MySQL administrator. It creates
+   the database, renames the seven tables into it, deletes the `heimdall.sql` row from the
+   characters database's `updates` table so the 1.x installer is forgotten, and replaces the
+   bot's grants - the per-table 1.x grants on the characters database are revoked and the account
+   is given Heimdall's database instead. The check queries at the end of the file should show
+   seven tables in the new database, none left in the old one, and `SHOW GRANTS` naming only the
+   new one.
+3. Install the 2.0.0 worldserver. Add `Heimdall.Database` to `heimdall.conf` only if you chose a
+   name other than `heimdall`.
+4. Set `MYSQL_DATABASE` in the bot's `.env` to the new database name.
+5. Start the worldserver, then the bot. `Heimdall.log` should say
+   `Heimdall schema ready in `heimdall`: 7 tables, schema version 1 (already present)`.
+
+The order matters in one place. A 2.0.0 worldserver started before the migration finds the tables
+still in the characters database and none in the new one, logs `This is a Heimdall 1.x install
+that has not been migrated`, and disables itself rather than create a second, empty set beside the
+real one. Nothing is changed; run the migration and start it again.
+
+Undo: `deploy/rollback-to-characters-db.sql` renames the tables back and restores the 1.x grants,
+for a return to a 1.x module. It does not restore the `updates` row - a 1.x worldserver that misses
+it re-applies its `heimdall.sql`, which is `CREATE TABLE IF NOT EXISTS` over tables that exist, and
+records it again.
 
 ## Keeping the repository outside the core tree
 
@@ -261,8 +300,14 @@ module is compiled into the worldserver, so it goes in at image build time: clon
 includes `modules/`, so that is all it takes. Adding the module to a running container does nothing
 — a module cannot be loaded without rebuilding the worldserver binary.
 
-Two Docker-specific traps are worth knowing before you start, and both are covered in
-[INSTALL-bot.md](INSTALL-bot.md#docker--tested): the shipped compose publishes MySQL on host port
+Heimdall's database is created for you in Docker: the bot's compose fragment mounts
+`deploy/docker/heimdall-init.sh` into the MySQL container, which creates the database and the bot's
+account on the first start with an empty volume, with the bot's password taken from
+`HEIMDALL_BOT_DB_PASSWORD` in the compose `.env`. The core connects as root in the shipped compose
+and needs no grant. Details in [INSTALL-bot.md](INSTALL-bot.md#docker--tested).
+
+Two Docker-specific traps are worth knowing before you start, and both are covered there as well:
+the shipped compose publishes MySQL on host port
 3306, which collides with any MySQL you already have, and the container entrypoint does **not**
 create `heimdall.conf` from its `.dist` the way it does for the core's own configs — you copy that
 one yourself, in the bind-mounted `env/dist/etc/modules/`.

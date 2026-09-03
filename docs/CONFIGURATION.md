@@ -2,7 +2,9 @@
 
 `DISCORD_TOKEN`, the guild ID, `DISCORD_STAFF_ROLE_IDS`, MySQL values, archive
 path, and `BOT_INSTANCE_ID` are required. The exact variables and safe sample
-values are in `.env.example`.
+values are in `.env.example`. `MYSQL_DATABASE` is Heimdall's own database - the
+value of `Heimdall.Database` in `heimdall.conf`, `heimdall` unless you changed
+it - and never a realm database.
 
 Roles are configured as two comma-separated ID lists — names never matter:
 
@@ -87,9 +89,18 @@ category would appear on every restart.
 ## Module settings worth knowing about
 
 Every `Heimdall.*` setting is documented beside itself in
-[`conf/heimdall.conf.dist`](../conf/heimdall.conf.dist). Two are called out here because 1.1.0
-changed what they do.
+[`conf/heimdall.conf.dist`](../conf/heimdall.conf.dist). Three are called out here: one because
+2.0.0 introduced it, two because 1.1.0 changed what they do.
 
+- `Heimdall.Database` — **new in 2.0.0**, default `heimdall`. The database, on the same MySQL
+  server as the realm, that holds Heimdall's seven tables. The module creates the tables there on
+  startup; the database itself, and the core's rights on it, are yours to create first
+  (`deploy/create-heimdall-database.sql`). The name must be a plain identifier - letters, digits,
+  `_` and `$`, at most 64 characters - and must not be the realm's characters database: the module
+  refuses both at startup and disables itself, saying which. Whatever you choose here is what the
+  bot's `MYSQL_DATABASE` must name, and what its MySQL account is granted. Upgrading an install
+  that has its tables in the characters database is covered under "Upgrading from 1.x" in
+  [INSTALL.md](INSTALL.md#upgrading-from-1x).
 - `Heimdall.DeliveryPollSeconds` — **default changed from 5 to 1 in 1.1.0.** It used to be a
   background retry cadence for queued whispers. It is now also the delay between a staff member
   pressing Revive, Claim or Close and the realm acting on it, because the bot no longer sends those

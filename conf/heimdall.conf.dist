@@ -3,13 +3,22 @@
 #
 # Copy this file to heimdall.conf in the worldserver modules config directory.
 # This module never contacts Discord. A separately deployed companion bot reads and writes only the
-# heimdall_* tables in the Characters database.
+# heimdall_* tables, which live in a database of their own (Heimdall.Database below), never in a
+# realm database.
 ###################################################################################################
 
 [worldserver]
 
 # Enable the game-side bridge.
 Heimdall.Enabled = 0
+
+# The database that holds Heimdall's tables, on the same MySQL server as the realm. The module
+# creates the tables there itself on first start; the database and the core's right to use it are
+# the one piece of manual SQL (deploy/create-heimdall-database.sql). The companion bot's account is
+# granted this database and nothing else, which is why it must not be a realm database: a value
+# equal to the characters database is refused at startup and the bridge stays disabled.
+# Letters, digits, _ and $ only, up to 64 characters. Must match MYSQL_DATABASE in the bot's .env.
+Heimdall.Database = "heimdall"
 
 # Short tag identifying this realm in ticket keys, 1-16 letters or digits (for example "ARCA",
 # giving keys like ARCA-42). Leave blank to derive it from this worldserver's RealmID instead,

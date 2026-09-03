@@ -69,7 +69,7 @@ Confirm the configure output lists `mod-heimdall` before building.
 
 ### 4) Database
 
-Nothing to do — the SQL installs itself. On first startup the AzerothCore updater applies `data/sql/db-characters/base/heimdall.sql` to the Characters database, creating seven `heimdall_*` tables. It touches nothing else.
+Create Heimdall's own database on the realm's MySQL server and give the core's user rights on it - `deploy/create-heimdall-database.sql` does both. The tables install themselves: on startup the module creates its seven `heimdall_*` tables there from `deploy/heimdall-schema.sql` and touches nothing else. Upgrading from 1.x, where the tables lived in the characters database, is one `RENAME TABLE` - see [Upgrading from 1.x](docs/INSTALL.md#upgrading-from-1x).
 
 ### 5) Configuration
 
@@ -122,7 +122,8 @@ realm a command of its own choosing: it asks for one of a fixed list of actions,
 composes the command itself. The GM identity is a realm account, but it is the module's rather than
 the bot's — its password is in no part of the bot's configuration, and a fully compromised bot could
 neither log into it nor speak as it. It does not give the bot access to player data; the bot's
-database account reaches only the seven `heimdall_*` tables. It does not link Discord accounts to
+database account reaches only Heimdall's own database, which holds its seven tables and nothing
+of the realm's. It does not link Discord accounts to
 game accounts, so it cannot offer self-service actions on a character. It does not send item or gold
 compensation. And it needs one small core patch to hold a GM identity in the world, which ships with
 the module and changes no behaviour.

@@ -5,9 +5,23 @@
 #
 # The bot joins ac-network and reaches the database by name, so MySQL does not have to be published
 # to the host at all. The database is the only thing it needs to reach: it sends the realm no
-# commands, it asks the module for actions by writing rows.
+# commands, it asks the module for actions by writing rows. And within that database it reaches
+# only Heimdall's own - it never connects to a realm database.
 
 services:
+  # Heimdall's database and the bot's account are created when MySQL initialises its volume: the
+  # image runs every file in /docker-entrypoint-initdb.d/ once, on first start. The bot's password
+  # comes from HEIMDALL_BOT_DB_PASSWORD in the .env beside docker-compose.yml, and must match
+  # MYSQL_PASSWORD in the bot's own .env. The core connects as root, so it needs nothing here.
+  # An existing volume never re-runs init scripts - there, create the database and the account
+  # by hand (deploy/create-heimdall-database.sql, bot/deploy/mysql-grants.sql with '%').
+  ac-database:
+    environment:
+      - HEIMDALL_BOT_DB_PASSWORD=${HEIMDALL_BOT_DB_PASSWORD:?set HEIMDALL_BOT_DB_PASSWORD in .env}
+      - HEIMDALL_DATABASE=${HEIMDALL_DATABASE:-heimdall}
+    volumes:
+      - ./modules/mod-heimdall/deploy/docker/heimdall-init.sh:/docker-entrypoint-initdb.d/heimdall-init.sh:ro
+
   heimdall-bot:
     build:
       context: ./modules/mod-heimdall/bot

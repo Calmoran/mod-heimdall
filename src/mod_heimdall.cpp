@@ -7,6 +7,7 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
+#include "MySQLConnection.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Player.h"
@@ -166,6 +167,7 @@ Settings ReadSettings()
     settings.commandAuditMaxLines = std::clamp<uint32>(sConfigMgr->GetOption<uint32>("Heimdall.CommandAuditMaxLines", 25), 1, 100);
     settings.contextRefreshSeconds = std::max<uint32>(10, sConfigMgr->GetOption<uint32>("Heimdall.ContextRefreshSeconds", 60));
     settings.gmChatTag = sConfigMgr->GetOption<bool>("Heimdall.GmChatTag", true);
+    settings.database = sConfigMgr->GetOption<std::string>("Heimdall.Database", "heimdall");
 
     // An operator who never reads the docs still gets working, realm-unique keys.
     settings.realmTag = settings.realmPrefix.empty()
@@ -202,7 +204,7 @@ void RecordIngameTicket(std::string const& realmTag, uint32 ticketId, uint64 pla
     // gm_ticket is deliberately absent from every mutation below. The companion bot performs any
     // lifecycle change through AzerothCore SOAP commands, never through SQL.
     transaction->Append(
-        "INSERT INTO heimdall_ticket "
+        Q("INSERT INTO heimdall_ticket "
         "(source, realm_tag, source_ticket_id, source_modified_time, public_key, player_guid, player_account_id, player_name, category, status) "
         "VALUES ('ingame', '{}', {}, {}, '{}', {}, {}, '{}', 'support', IF({} = 1, 'closed', 'open')) "
         "ON DUPLICATE KEY UPDATE player_guid = VALUES(player_guid), player_name = VALUES(player_name), "
@@ -211,23 +213,23 @@ void RecordIngameTicket(std::string const& realmTag, uint32 ticketId, uint64 pla
         "status = IF(VALUES(status) = 'closed', 'closed', status), "
         "closed_at = IF(VALUES(status) = 'closed', COALESCE(closed_at, CURRENT_TIMESTAMP), closed_at), "
         "transcript_expires_at = IF(VALUES(status) = 'closed', COALESCE(transcript_expires_at, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL {} DAY)), transcript_expires_at), "
-        "version = version + 1",
+        "version = version + 1"),
         escapedRealmTag, ticketId, modifiedTime, escapedPublicKey, playerGuid, playerAccountId, escapedName, completed ? 1 : 0, retentionDays);
 
     transaction->Append(
-        "INSERT IGNORE INTO heimdall_event "
+        Q("INSERT IGNORE INTO heimdall_event "
         "(ticket_id, event_key, event_type, actor_kind, actor_ref, payload_json) "
         "SELECT id, SHA2('{}', 256), '{}', 'player', '{}', JSON_OBJECT('description', '{}', 'modifiedTime', {}) "
-        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}",
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}"),
         escapedEventKey, completed ? "ingame_ticket_closed" : "ingame_ticket_observed",
         escapedName, escapedDescription, modifiedTime, escapedRealmTag, ticketId);
 
     transaction->Append(
-        "INSERT IGNORE INTO heimdall_delivery "
+        Q("INSERT IGNORE INTO heimdall_delivery "
         "(ticket_id, delivery_key, direction, kind, payload_json) "
         "SELECT id, SHA2(CONCAT('{}', ':discord'), 256), 'to_discord', 'sync_ingame_ticket', "
         "JSON_OBJECT('realmTag', '{}', 'sourceTicketId', {}, 'playerName', '{}', 'description', '{}', 'completed', {}) "
-        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}",
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}"),
         escapedEventKey, escapedRealmTag, ticketId, escapedName, escapedDescription, completed ? 1 : 0,
         escapedRealmTag, ticketId);
 
@@ -358,8 +360,8 @@ public:
         }
 
         CharacterDatabase.Execute(
-            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
-            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Q("INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)"),
             Escape("ingame.gm_identities." + _realmTag), Escape(names));
     }
 
@@ -579,8 +581,8 @@ private:
     void PublishState(std::string const& name, bool held) const
     {
         CharacterDatabase.Execute(
-            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
-            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Q("INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)"),
             Escape("identity.state." + _realmTag + "." + name), held ? "held" : "offline");
     }
 
@@ -661,14 +663,14 @@ void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, ui
     rawKey << "ingame:" << realmTag << ':' << sourceTicketId << ":context";
 
     CharacterDatabase.Execute(
-        "INSERT INTO heimdall_event "
+        Q("INSERT INTO heimdall_event "
         "(ticket_id, event_key, event_type, actor_kind, actor_ref, payload_json) "
         "SELECT id, SHA2('{}', 256), 'player_context', 'system', '{}', "
         "JSON_OBJECT('name', '{}', 'level', {}, 'class', {}, 'race', {}, 'gender', {}, "
         "'zoneId', {}, 'online', {}, 'accountId', {}, 'accountCreated', {}, "
         "'totalPlaytime', {}, 'lastLogout', {}, 'capturedAt', {}) "
         "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {} "
-        "ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json)",
+        "ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json)"),
         Escape(rawKey.str()), Escape(cache->Name), Escape(cache->Name), level, uint32(cache->Class), uint32(cache->Race),
         uint32(cache->Sex), zoneId, online ? 1 : 0, cache->AccountId, accountCreated, totalPlaytime, lastLogout,
         uint32(GameTime::GetGameTime().count()), escapedRealmTag, sourceTicketId);
@@ -710,6 +712,38 @@ public:
                 "Discord-created tickets, so in-game keys must not use it. Choose a different prefix. Bridge disabled.",
                 _settings.realmPrefix, RESERVED_REALM_TAG);
 
+            return;
+        }
+
+        // The value goes into SQL as a quoted identifier, so it is checked against MySQL's bare
+        // identifier alphabet before anything is built from it. It must also differ from the
+        // characters database: the point of the separate schema is that the bot's grants can stop
+        // at its edge, and a module told to put its tables back in the realm's database would
+        // silently undo that boundary.
+        if (!Sql::IsValidDatabaseName(_settings.database))
+        {
+            _settings.enabled = false;
+
+            LOG_ERROR(LOG_FILTER, "Heimdall.Database \"{}\" is not a valid database name: it must be 1-64 characters "
+                "of letters, digits, _ or $. Bridge disabled.", _settings.database);
+
+            return;
+        }
+
+        if (MySQLConnectionInfo const* info = CharacterDatabase.GetConnectionInfo(); info && info->database == _settings.database)
+        {
+            _settings.enabled = false;
+
+            LOG_ERROR(LOG_FILTER, "Heimdall.Database \"{}\" is the realm's characters database. Heimdall's tables "
+                "belong in a database of their own so the companion bot can be granted access to nothing else. "
+                "Bridge disabled.", _settings.database);
+
+            return;
+        }
+
+        if (!EnsureSchema())
+        {
+            _settings.enabled = false;
             return;
         }
 
@@ -771,8 +805,8 @@ public:
     void WarnAboutForeignRealmTags()
     {
         QueryResult rows = CharacterDatabase.Query(
-            "SELECT realm_tag, SUM(status IN ('open', 'claimed', 'closing')), COUNT(*) "
-            "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag <> '{}' GROUP BY realm_tag",
+            Q("SELECT realm_tag, SUM(status IN ('open', 'claimed', 'closing')), COUNT(*) "
+            "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag <> '{}' GROUP BY realm_tag"),
             Escape(_settings.realmTag));
         if (!rows)
             return;
@@ -854,12 +888,12 @@ public:
         //    the bridge's own record of what it believes is unfinished, it survives a restart, and
         //    it is the same table SeedSeenTickets already reads.
         QueryResult rows = CharacterDatabase.Query(
-            "SELECT Id, playerGuid, name, description, lastModifiedTime, completed, type "
+            Q("SELECT Id, playerGuid, name, description, lastModifiedTime, completed, type "
             "FROM gm_ticket WHERE type IN (0, 1, 2) AND (lastModifiedTime >= {} OR (completed = 0 AND type = 0) "
             "  OR Id IN (SELECT source_ticket_id FROM heimdall_ticket "
             "            WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id IS NOT NULL "
             "              AND status IN ('open', 'claimed', 'closing'))) "
-            "ORDER BY Id",
+            "ORDER BY Id"),
             _watermark, Escape(_settings.realmTag));
         if (!rows)
             return;
@@ -937,7 +971,7 @@ private:
     bool LoadWatermark()
     {
         QueryResult result = CharacterDatabase.Query(
-            "SELECT setting_value FROM heimdall_setting WHERE setting_key = '{}'",
+            Q("SELECT setting_value FROM heimdall_setting WHERE setting_key = '{}'"),
             Escape(WatermarkKey()));
         if (!result)
             return false;
@@ -956,7 +990,7 @@ private:
     void LoadImportFloor()
     {
         QueryResult result = CharacterDatabase.Query(
-            "SELECT setting_value FROM heimdall_setting WHERE setting_key = '{}'",
+            Q("SELECT setting_value FROM heimdall_setting WHERE setting_key = '{}'"),
             Escape(ImportFloorKey()));
         if (!result)
             return;
@@ -968,8 +1002,8 @@ private:
     void SaveImportFloor() const
     {
         CharacterDatabase.Execute(
-            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
-            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Q("INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)"),
             Escape(ImportFloorKey()), _importFloor);
     }
 
@@ -1030,8 +1064,8 @@ private:
     void SaveWatermark() const
     {
         CharacterDatabase.Execute(
-            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
-            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Q("INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)"),
             Escape(WatermarkKey()), _watermark);
     }
 
@@ -1040,8 +1074,8 @@ private:
     void SeedSeenTickets()
     {
         QueryResult result = CharacterDatabase.Query(
-            "SELECT source_ticket_id, source_modified_time, status, player_guid FROM heimdall_ticket "
-            "WHERE source = 'ingame' AND realm_tag = '{}'",
+            Q("SELECT source_ticket_id, source_modified_time, status, player_guid FROM heimdall_ticket "
+            "WHERE source = 'ingame' AND realm_tag = '{}'"),
             Escape(_settings.realmTag));
         if (!result)
             return;
@@ -1080,23 +1114,23 @@ private:
 
         // Recover anything a previous run leased and never finished.
         CharacterDatabase.Execute(
-            "UPDATE heimdall_delivery d "
+            Q("UPDATE heimdall_delivery d "
             "JOIN heimdall_ticket t ON t.id = d.ticket_id "
             "SET d.state = 'queued', d.lease_owner = NULL, d.leased_until = NULL "
             "WHERE d.direction = 'to_game' AND d.state = 'leased' AND d.leased_until < CURRENT_TIMESTAMP "
-            "AND t.realm_tag = '{}'",
+            "AND t.realm_tag = '{}'"),
             escapedRealmTag);
 
         // MySQL does the JSON parsing so the module needs no JSON dependency.
         QueryResult rows = CharacterDatabase.Query(
-            "SELECT d.id, d.ticket_id, d.kind, t.source_ticket_id, t.player_guid, "
+            Q("SELECT d.id, d.ticket_id, d.kind, t.source_ticket_id, t.player_guid, "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.gmName')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.playerName')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.text')) "
             "FROM heimdall_delivery d "
             "JOIN heimdall_ticket t ON t.id = d.ticket_id "
             "WHERE d.direction = 'to_game' AND d.state = 'queued' AND d.available_at <= CURRENT_TIMESTAMP "
-            "AND t.realm_tag = '{}' ORDER BY d.id LIMIT 20",
+            "AND t.realm_tag = '{}' ORDER BY d.id LIMIT 20"),
             escapedRealmTag);
         if (!rows)
             return;
@@ -1126,8 +1160,8 @@ private:
             {
                 PublishPlayerContext(_settings.realmTag, sourceTicketId, rowPlayerGuid);
                 CharacterDatabase.Execute(
-                    "UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
-                    "attempts = attempts + 1, lease_owner = '{}' WHERE id = {} AND state = 'queued'",
+                    Q("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
+                    "attempts = attempts + 1, lease_owner = '{}' WHERE id = {} AND state = 'queued'"),
                     Escape(LeaseOwner()), deliveryId);
                 continue;
             }
@@ -1143,16 +1177,16 @@ private:
 
             // Lease first so a crash mid-delivery leaves a recoverable row rather than a silent loss.
             CharacterDatabase.Execute(
-                "UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, "
+                Q("UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, "
                 "lease_owner = '{}', leased_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL {} SECOND) "
-                "WHERE id = {} AND state = 'queued'",
+                "WHERE id = {} AND state = 'queued'"),
                 Escape(LeaseOwner()), DELIVERY_LEASE_SECONDS, deliveryId);
 
             speaker->Whisper(text, LANG_UNIVERSAL, target);
 
             CharacterDatabase.Execute(
-                "UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
-                "leased_until = NULL WHERE id = {}",
+                Q("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
+                "leased_until = NULL WHERE id = {}"),
                 deliveryId);
 
             LOG_INFO(LOG_FILTER, "Delivered ticket reply from \"{}\" to \"{}\" (delivery {}).", gmName, targetName, deliveryId);
@@ -1178,13 +1212,13 @@ private:
 
         // Recover rows a previous run of this worldserver left stranded in 'leased'.
         CharacterDatabase.Execute(
-            "UPDATE heimdall_delivery SET state = 'queued', lease_owner = NULL, leased_until = NULL "
+            Q("UPDATE heimdall_delivery SET state = 'queued', lease_owner = NULL, leased_until = NULL "
             "WHERE direction = 'soap' AND state = 'leased' AND leased_until < CURRENT_TIMESTAMP "
-            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.realmTag')) = '{}'",
+            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.realmTag')) = '{}'"),
             escapedRealmTag);
 
         QueryResult rows = CharacterDatabase.Query(
-            "SELECT d.id, d.kind, d.attempts, COALESCE(d.ticket_id, 0), "
+            Q("SELECT d.id, d.kind, d.attempts, COALESCE(d.ticket_id, 0), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.action')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.sourceTicketId')), "
             "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.gmName')), "
@@ -1195,7 +1229,7 @@ private:
             "FROM heimdall_delivery d "
             "WHERE d.direction = 'soap' AND d.state = 'queued' AND d.available_at <= CURRENT_TIMESTAMP "
             "AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.realmTag')) = '{}' "
-            "ORDER BY d.id LIMIT 20",
+            "ORDER BY d.id LIMIT 20"),
             escapedRealmTag);
         if (!rows)
             return;
@@ -1222,9 +1256,9 @@ private:
             // Lease before performing, so a crash mid-command leaves a recoverable row rather than
             // a command whose fate nobody knows.
             CharacterDatabase.Execute(
-                "UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, "
+                Q("UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, "
                 "lease_owner = '{}', leased_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL {} SECOND) "
-                "WHERE id = {} AND state = 'queued'",
+                "WHERE id = {} AND state = 'queued'"),
                 Escape(LeaseOwner()), DELIVERY_LEASE_SECONDS, deliveryId);
 
             std::string command;
@@ -1252,8 +1286,8 @@ private:
             }
 
             CharacterDatabase.Execute(
-                "UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
-                "leased_until = NULL, last_error = NULL WHERE id = {}",
+                Q("UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
+                "leased_until = NULL, last_error = NULL WHERE id = {}"),
                 deliveryId);
 
             AttributeGameCommand(command, causedBy);
@@ -1397,9 +1431,9 @@ private:
         bool dead = attempts >= _settings.deliveryMaxAttempts;
 
         CharacterDatabase.Execute(
-            "UPDATE heimdall_delivery SET state = '{}', "
+            Q("UPDATE heimdall_delivery SET state = '{}', "
             "available_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL LEAST(900, POW(2, {}) * 5) SECOND), "
-            "leased_until = NULL, last_error = LEFT('{}', 512) WHERE id = {}",
+            "leased_until = NULL, last_error = LEFT('{}', 512) WHERE id = {}"),
             dead ? "dead" : "queued", attempts, Escape(reason), deliveryId);
 
         LOG_WARN(LOG_FILTER, "Delivery {} ({}) failed on attempt {}{}: {}", deliveryId, kind, attempts,
@@ -1409,9 +1443,9 @@ private:
         rawKey << "trouble:" << _settings.realmTag << ':' << deliveryId << ':' << attempts;
 
         CharacterDatabase.Execute(
-            "INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
+            Q("INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
             "VALUES ({}, SHA2('{}', 256), 'to_discord', 'delivery_trouble', "
-            "JSON_OBJECT('realmTag', '{}', 'ofKind', '{}', 'state', '{}', 'attempts', {}, 'error', '{}'))",
+            "JSON_OBJECT('realmTag', '{}', 'ofKind', '{}', 'state', '{}', 'attempts', {}, 'error', '{}'))"),
             ticketId ? std::to_string(ticketId) : std::string("NULL"), Escape(rawKey.str()),
             Escape(_settings.realmTag), Escape(kind), dead ? "dead" : "queued", attempts, Escape(reason));
     }
@@ -1428,9 +1462,9 @@ private:
         rawKey << "attrib:" << _settings.realmTag << ':' << GameTime::GetGameTime().count() << ':' << command << ':' << causedBy;
 
         CharacterDatabase.Execute(
-            "INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
+            Q("INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
             "VALUES (NULL, SHA2('{}', 256), 'to_discord', 'command_attribution', "
-            "JSON_OBJECT('realmTag', '{}', 'command', '{}', 'causedBy', {}))",
+            "JSON_OBJECT('realmTag', '{}', 'command', '{}', 'causedBy', {}))"),
             Escape(rawKey.str()), Escape(_settings.realmTag), Escape(command),
             causedBy.empty() ? std::string("NULL") : ("'" + Escape(causedBy) + "'"));
     }
@@ -1443,8 +1477,8 @@ private:
     void PublishCommandChannel() const
     {
         CharacterDatabase.Execute(
-            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
-            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Q("INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)"),
             Escape("runtime.command_channel." + _settings.realmTag), Escape(std::string(HEIMDALL_VERSION)));
     }
 
@@ -1463,9 +1497,9 @@ private:
         _contextElapsed = 0;
 
         QueryResult rows = CharacterDatabase.Query(
-            "SELECT source_ticket_id, player_guid FROM heimdall_ticket "
+            Q("SELECT source_ticket_id, player_guid FROM heimdall_ticket "
             "WHERE source = 'ingame' AND realm_tag = '{}' AND status IN ('open', 'claimed', 'closing') "
-            "AND player_guid IS NOT NULL LIMIT 50",
+            "AND player_guid IS NOT NULL LIMIT 50"),
             Escape(_settings.realmTag));
         if (!rows)
             return;
@@ -1504,20 +1538,20 @@ void RecordPlayerWhisper(std::string const& realmTag, uint32 sourceTicketId, std
     CharacterDatabaseTransaction transaction = CharacterDatabase.BeginTransaction();
 
     transaction->Append(
-        "INSERT IGNORE INTO heimdall_event "
+        Q("INSERT IGNORE INTO heimdall_event "
         "(ticket_id, event_key, event_type, actor_kind, actor_ref, payload_json) "
         "SELECT id, SHA2('{}', 256), 'player_whisper', 'player', '{}', "
         "JSON_OBJECT('text', '{}', 'identityName', '{}', 'realmTag', '{}') "
-        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}",
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}"),
         escapedEventKey, escapedPlayerName, escapedText, escapedIdentityName, escapedRealmTag,
         escapedRealmTag, sourceTicketId);
 
     transaction->Append(
-        "INSERT IGNORE INTO heimdall_delivery "
+        Q("INSERT IGNORE INTO heimdall_delivery "
         "(ticket_id, delivery_key, direction, kind, payload_json) "
         "SELECT id, SHA2(CONCAT('{}', ':discord'), 256), 'to_discord', 'player_whisper', "
         "JSON_OBJECT('realmTag', '{}', 'sourceTicketId', {}, 'playerName', '{}', 'identityName', '{}', 'text', '{}') "
-        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}",
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}"),
         escapedEventKey, escapedRealmTag, sourceTicketId, escapedPlayerName, escapedIdentityName, escapedText,
         escapedRealmTag, sourceTicketId);
 

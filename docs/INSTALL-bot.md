@@ -6,12 +6,17 @@ realm. Do not start on a public realm.
 ## 1. Install the module first
 
 Follow [the module installation guide](INSTALL.md), including its one small core patch before
-building. Confirm the module's SQL tables exist in the Characters database.
+building. Confirm Heimdall's database exists and holds the module's seven tables - the module
+creates them on its first start, and its `Heimdall schema ready` log line says so.
 
 The bot is not a second download: it lives in this repository's `bot/` directory, so the clone you
 just installed the module from already contains it. Every command in this guide runs from `bot/`
-unless it says otherwise. Keep the bot account limited to those tables using
-`deploy/mysql-grants.sql`; replace every placeholder before running it.
+unless it says otherwise. Create the bot's MySQL account with `deploy/mysql-grants.sql`, replacing
+every placeholder before running it. The bot never connects to a realm database. Its database
+contains Heimdall's own tables and nothing else, and that database is all the account is granted:
+a `SELECT` against the realm's characters table fails with `ERROR 1142 (42000): SELECT command
+denied`. `MYSQL_DATABASE` in `.env` names it - `heimdall`, unless `Heimdall.Database` in
+`heimdall.conf` says otherwise.
 
 That file creates the account for both `@localhost` and `@127.0.0.1`, and you
 need both. MySQL treats them as separate accounts: `localhost` matches a
@@ -128,8 +133,9 @@ credential to guard. What a compromised bot could do is queue "close ticket 7". 
 `.ban`, because no field it writes could carry one - the module would see an action it does not
 have, and refuse it.
 
-The bot's only access to your realm is the MySQL account you create in the next step: per-table
-grants on seven `heimdall_*` tables, no DDL, loopback only.
+The bot's only access to your realm is the MySQL account you create in the next step, and it is
+not access to the realm: the account is granted Heimdall's own database, which holds seven
+`heimdall_*` tables and nothing else. No DDL, loopback only.
 
 ### Checking that for yourself
 
@@ -155,7 +161,7 @@ archive: /var/lib/heimdall/archive (not under a public web root)
 ```
 
 Copy `.env.example` to the environment location and replace every placeholder.
-Keep MySQL loopback-only. The token, the database password, and the environment
+`MYSQL_DATABASE` is Heimdall's database, not a realm one. Keep MySQL loopback-only. The token, the database password, and the environment
 file must never be committed or shared in tickets/screenshots.
 
 ## 5. Install and start
@@ -242,10 +248,21 @@ cp env/dist/etc/modules/heimdall.conf.dist env/dist/etc/modules/heimdall.conf
 Then restart the worldserver. (AzerothCore also accepts `AC_`-prefixed environment variables —
 `AC_HEIMDALL_GM_CHAT_TAG` and so on — if you would rather keep configuration in Compose.)
 
-**The shipped MySQL grants do not apply.** `deploy/mysql-grants.sql` grants to `'heimdall_bot'@'localhost'`
-and `@'127.0.0.1'`. A bot in another container connects from neither — it arrives from the Compose
-network's address range. Grant to `'heimdall_bot'@'%'` instead; the network is isolated, and the
-account still reaches only the seven `heimdall_*` tables.
+**The database and the bot's account are created for you, once.** The compose fragment mounts
+`deploy/docker/heimdall-init.sh` (at the repository root, under `deploy/docker/`) into the MySQL
+container's `/docker-entrypoint-initdb.d/`. The MySQL image runs it exactly once, on the first
+start with an empty data volume: it creates Heimdall's database and `'heimdall_bot'@'%'`, granted
+that database and nothing else. The password comes from `HEIMDALL_BOT_DB_PASSWORD` in the compose
+`.env` - the fragment refuses to start `ac-database` without it - and must match `MYSQL_PASSWORD`
+in the bot's own `.env`, with `MYSQL_DATABASE=heimdall`. A different database name is
+`HEIMDALL_DATABASE` in the same compose `.env`, and then `Heimdall.Database` in `heimdall.conf`.
+The core connects to `ac-database` as root in the shipped compose, so it needs no grant.
+
+The script never runs against an existing volume. If MySQL was initialised before you added the
+fragment, create the database and the account by hand: `deploy/create-heimdall-database.sql`,
+then `deploy/mysql-grants.sql` with the host changed from `localhost` and `127.0.0.1` to `%` - a
+bot in another container connects from the Compose network's address range, not from loopback. The
+network is isolated, and the account still reaches only Heimdall's database.
 
 **Addresses are service names.** `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`. `127.0.0.1` in a
 container is the container itself. If MySQL runs on the host instead, `host.docker.internal` reaches
@@ -297,7 +314,9 @@ all of them cost someone an afternoon.
 
 ## 8. Upgrading
 
-1. Read the release notes and back up the `heimdall_*` tables together with the archive directory.
+1. Read the release notes and back up Heimdall's database together with the archive directory.
+   Upgrading from 1.x moves the tables into that database first: follow "Upgrading from 1.x" in
+   [INSTALL.md](INSTALL.md#upgrading-from-1x), then set `MYSQL_DATABASE` in `.env` to its name.
 2. **Stop the bot cleanly** — Ctrl+C, or `systemctl stop`, not a force-kill. A clean stop releases the
    single-instance lock immediately, so the upgraded bot starts at once. A force-kill leaves the lock
    held by a process that no longer exists and the new one waits out a 60-second staleness window,

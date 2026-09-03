@@ -44,6 +44,16 @@ jobs:
       - name: build
         run: cmake --build build --target modules -j 2
 
+  qualify-test:
+    runs-on: ubuntu-latest
+    name: sql qualifier unit test
+    # Seconds, not minutes: the header depends on the standard library only, so this runs without
+    # the core. It is the guard against Qualify() rewriting a table name inside a constraint or
+    # index name, which would corrupt the DDL the module runs at startup.
+    steps:
+      - uses: actions/checkout@v4
+      - run: g++ -std=c++17 -Wall -Wextra -Werror -I src test/qualify_test.cpp -o qualify_test && ./qualify_test
+
   bot-tests:
     runs-on: ${{ matrix.os }}
     name: bot tests (${{ matrix.os }}, node ${{ matrix.node }})

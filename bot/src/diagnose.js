@@ -102,6 +102,22 @@ async function main() {
     pool = mysql.createPool({ ...config.mysql, connectionLimit: 1, waitForConnections: true })
     const [[version]] = await pool.execute('SELECT VERSION() AS v')
     say('connection', `ok, MySQL ${version.v}`)
+    // What the account can see is the boundary made visible. MySQL lists only the databases an
+    // account holds some privilege on, so the right answer is Heimdall's database and the two
+    // system schemas every account sees. A realm database in this list means the grants are wrong.
+    try {
+      const [rows] = await pool.query('SHOW DATABASES')
+      const visible = rows.map((row) => Object.values(row)[0])
+        .filter((name) => name !== 'information_schema' && name !== 'performance_schema')
+      say('visible databases', visible.join(', ') || 'none')
+      const others = visible.filter((name) => name !== config.mysql.database)
+      if (others.length) {
+        out.push(`  ! This account can see ${others.length} database(s) besides its own: ${others.join(', ')}.`
+          + " It should be granted Heimdall's database only - see deploy/mysql-grants.sql.")
+      }
+    } catch (error) {
+      say('visible databases', `UNREADABLE: ${error.code ?? error.message}`)
+    }
     for (const table of TABLES) {
       try {
         const [[row]] = await pool.execute(`SELECT COUNT(*) AS n FROM heimdall_${table}`)

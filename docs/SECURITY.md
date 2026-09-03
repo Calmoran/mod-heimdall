@@ -19,9 +19,20 @@
   Moderator is the lowest level that satisfies the check and nothing here uses more. That privilege
   sits on realm accounts, granted by your own GM commands; Heimdall neither stores it nor grants
   it, and the bot never sees it.
-- Keep MySQL bound to loopback. Grant the bot only the module table privileges shown in
-  `deploy/mysql-grants.sql`; do not grant broad Characters, Auth, or World access. That account is
-  the whole of the bot's access to your realm.
+- **The bot never connects to a realm database. Its database contains Heimdall's own tables and
+  nothing else.** The module keeps those tables in a database of their own (`Heimdall.Database`,
+  default `heimdall`) and refuses to run with the realm's characters database named there. The
+  bot's account is granted that database, as `bot/deploy/mysql-grants.sql` shows, and no other:
+  a `SELECT` against a realm table is refused by MySQL with `ERROR 1142 (42000): SELECT command
+  denied`, and `SHOW DATABASES` from that account lists Heimdall's and nothing of the realm's.
+  Keep MySQL bound to loopback; do not grant the account Characters, Auth, or World access.
+- **Nothing here updates itself.** The module is compiled into your worldserver and the bot runs
+  the code you checked out; neither fetches code at runtime, and a release reaches your realm only
+  when you pull it and rebuild or restart deliberately. Read the changelog before you do. Should a
+  release ever carry something it should not, the database boundary above is what contains it -
+  the bot's code, whatever it says, reaches only Heimdall's database - and the grants behind it are
+  the fallback: an account with `SELECT, INSERT, UPDATE, DELETE` on one database cannot read a
+  realm table, drop one of its own, or alter a schema.
 - Do not give the Discord bot Administrator. Use only the documented channel,
   interaction, history, message, and overwrite permissions.
 - Every ticket control checks role eligibility, and actions that speak for a GM
@@ -30,7 +41,7 @@
   content is size limited, and files are saved outside the web root with hashes.
 - Treat closure notes as internal. No user-controlled text is ever spliced into
   command syntax: the module builds each command from validated fields.
-- Back up the module tables and private archive together; see the backup section
+- Back up Heimdall's database and private archive together; see the backup section
   of `docs/OPERATIONS.md`.
 
 If a secret is exposed, revoke/rotate it immediately, invalidate active bot

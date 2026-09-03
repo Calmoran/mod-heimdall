@@ -3,6 +3,58 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 2.0.0 — 2026-09-02
+
+Heimdall's tables leave the realm's characters database. This is a major version because the move
+is a one-time migration on every existing install, and because it changes the one sentence that
+matters most about the bot: **the bot never connects to a realm database. Its database contains
+Heimdall's own tables and nothing else.**
+
+### Changed
+
+- **Heimdall has a database of its own.** The seven `heimdall_*` tables now live in a database
+  named by the new `Heimdall.Database` setting - `heimdall` by default - on the same MySQL server
+  as the realm. The module addresses it by name from the core's characters connection, so no new
+  connection, pool or credential is involved; every query is qualified at the call site, and a
+  name that is not a plain identifier, or that *is* the characters database, is refused at
+  startup with the module disabled.
+
+  Until now the bot's account was granted seven named tables inside the characters database, and
+  the boundary held only as long as those grants were exact. Now the account is granted one
+  database that has nothing of the realm's in it. A `SELECT` against `characters` from that account
+  is refused by MySQL itself - `ERROR 1142 (42000): SELECT command denied` - and `SHOW DATABASES`
+  from it lists Heimdall's and no realm database. `bot/deploy/mysql-grants.sql` is rewritten
+  accordingly, and `npm run diagnose` now prints what the account can see and warns when that is
+  more than it should be.
+
+- **The module creates its own tables.** AzerothCore's updater is no longer involved: the schema
+  moved from `data/sql/db-characters/base/heimdall.sql` to `deploy/heimdall-schema.sql`, the same
+  text is compiled into the module, and on startup it creates whatever is missing and records a
+  schema version in `heimdall_setting`. A test fails the build if the two copies differ by a byte.
+  The startup guard refuses to run against a 1.x install that has not been migrated - it finds the
+  tables in the characters database and none in Heimdall's, says so, and creates nothing - and
+  refuses a schema version newer than it knows.
+
+- **Upgrading is one `RENAME TABLE`.** `deploy/migrate-to-heimdall-db.sql` creates the database,
+  renames the seven tables into it in a single atomic statement - no rows copied, ids and foreign
+  keys intact - forgets the 1.x installer's row in the characters database's `updates` table, and
+  replaces the bot's grants. `deploy/rollback-to-characters-db.sql` is the exact inverse. The
+  steps, and the one ordering mistake the module catches for you, are under "Upgrading from 1.x"
+  in `docs/INSTALL.md`. The bot's `MYSQL_DATABASE` must then name the new database.
+
+- **Docker creates the database for you.** The compose fragment mounts
+  `deploy/docker/heimdall-init.sh` into the MySQL container, which creates Heimdall's database and
+  the bot's account on the first start with an empty volume, from `HEIMDALL_BOT_DB_PASSWORD` in
+  the compose `.env`. An existing volume is never touched.
+
+### Documentation
+
+- `docs/SECURITY.md` states the database boundary and, new, the supply-chain posture: nothing
+  here updates itself, a release reaches a realm only when its operator pulls it, and the database
+  boundary is what contains a bad one, with the grants as the fallback behind it.
+- INSTALL, INSTALL-bot, CONFIGURATION, ARCHITECTURE, OPERATIONS and the README no longer describe
+  the tables as living in the characters database, because they do not.
+
 ## 1.1.3 — 2026-09-01
 
 Documentation, and one small thing the bot does differently. The install guide told you the GM

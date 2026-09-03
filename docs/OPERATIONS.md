@@ -42,16 +42,18 @@ module and bot retention values in sync with each other.
 
 ## Backup and restore
 
-Before any upgrade, back up all `heimdall_` tables and the private
-archive directory together. Restore both to a non-public test environment first,
+Before any upgrade, back up Heimdall's database (`Heimdall.Database`, default
+`heimdall` - all seven `heimdall_` tables) and the private archive directory
+together. Restore both to a non-public test environment first,
 start the bot with a temporary Discord guild, and verify ticket history and
 attachments.
 
 ## Upgrade
 
-Read the release notes, back up, stop the bot, apply module SQL migrations in
-order, update the module and bot code, install production dependencies, validate
-the environment file, then start the bot and inspect its logs. Perform one
+Read the release notes, back up, stop the bot, apply any SQL migration the
+release ships (2.0.0 has one: `deploy/migrate-to-heimdall-db.sql`, described in
+INSTALL.md), update the module and bot code, install production dependencies,
+validate the environment file, then start the bot and inspect its logs. Perform one
 Discord-native and one in-game ticket smoke test.
 
 ## Rollback

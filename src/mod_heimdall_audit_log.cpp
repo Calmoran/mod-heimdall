@@ -103,10 +103,10 @@ public:
 
         // ticket_id is left NULL: this delivery is not about a ticket.
         CharacterDatabase.Execute(
-            "INSERT IGNORE INTO heimdall_delivery "
+            Q("INSERT IGNORE INTO heimdall_delivery "
             "(ticket_id, delivery_key, direction, kind, payload_json) "
             "VALUES (NULL, SHA2('{}', 256), 'to_discord', 'gm_command_audit', "
-            "JSON_OBJECT('realmTag', '{}', 'entries', JSON_ARRAY({})))",
+            "JSON_OBJECT('realmTag', '{}', 'entries', JSON_ARRAY({})))"),
             Escape(rawKey.str()), Escape(_realmTag), entries.str());
 
         _pending.clear();

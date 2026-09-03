@@ -3,7 +3,10 @@
 
 #include "Define.h"
 
+#include "mod_heimdall_qualify.h"
+
 #include <string>
+#include <string_view>
 
 // The little that more than one translation unit of this module needs: the settings every part
 // reads, string escaping for the SQL the module writes, and the entry points of the GM command
@@ -19,11 +22,16 @@ constexpr char const* LOG_FILTER = "module.heimdall";
 
 // Kept in step with the companion bot's package.json version: the two halves release together, so
 // one number answers "which Heimdall are you running" for both.
-constexpr char const* HEIMDALL_VERSION = "1.1.3";
+constexpr char const* HEIMDALL_VERSION = "2.0.0";
 
 struct Settings
 {
     bool enabled = false;
+    // The database that holds Heimdall's seven tables. Not the realm's characters database: the
+    // tables live in a schema of their own so the companion bot's MySQL account can be granted
+    // rights on that schema and nothing else. Every query still runs on the core's characters
+    // connection, with the table names qualified through Q() below.
+    std::string database = "heimdall";
     uint32 ticketPollSeconds = 15;
     // One second, not five. The bot no longer reaches the realm over SOAP: a staff member pressing
     // Revive or Close queues a row that this poll picks up, so this interval is now the whole of
@@ -58,6 +66,26 @@ struct Settings
 Settings& CurrentSettings();
 
 std::string Escape(std::string value);
+
+// Rewrites the bare heimdall_* table names in `sql` as `<Heimdall.Database>`.`heimdall_*`. Every
+// statement the module sends that touches one of its own tables goes through this; statements
+// against the realm's tables (characters, gm_ticket, account) do not, and are unchanged.
+inline std::string Q(std::string_view sql)
+{
+    return Sql::Qualify(sql, CurrentSettings().database);
+}
+
+// --- Schema (mod_heimdall_schema.cpp) ------------------------------------------------------
+// Creates Heimdall's tables in Heimdall.Database on the characters connection if they are not
+// there yet, and records the schema version in heimdall_setting. Returns false, with the reason
+// already logged, when the module must not run: the database is unreachable, a table could not be
+// created, or a 1.x install still has its tables in the characters database and has not been
+// migrated (deploy/migrate-to-heimdall-db.sql).
+bool EnsureSchema();
+
+// The DDL the module runs, verbatim from deploy/heimdall-schema.sql (test/schema_drift.test.js
+// in the bot keeps the two identical).
+std::string_view SchemaDdl();
 
 // --- GM command audit log (mod_heimdall_audit_log.cpp) -----------------------------------
 // An optional extra, off by default, coupled to the rest of the module only through the shared
