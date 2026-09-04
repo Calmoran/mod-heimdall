@@ -33,7 +33,7 @@ git apply --reverse --check modules/mod-heimdall/patches/0001-expose-loginqueryh
   && echo "ALREADY APPLIED - skip this step"
 ```
 
-If that prints nothing, the patch does not fit your core version — see
+If that does not print `ALREADY APPLIED`, the patch does not fit your core version — see
 [Troubleshooting: the core patch](INSTALL-troubleshooting.md#the-core-patch-will-not-apply). Why the
 patch exists: [patches/README.md](../patches/README.md).
 
@@ -47,12 +47,8 @@ cp -n conf/dist/config.sh conf/config.sh
 ./acore.sh compiler build
 ```
 
-**Raw CMake install:**
-
-```bash
-cmake -S /home/acore/azerothcore-wotlk -B /home/acore/build -DMODULES=static
-cmake --build /home/acore/build --target install
-```
+**Raw CMake install:** add `-DMODULES=static` to the configure command you already build with, and
+rebuild.
 
 The configure output must list `mod-heimdall`. A module the build does not discover produces no
 error at all — it simply is not there. On a box that is also serving players, cap the build's
@@ -88,7 +84,9 @@ read line number 1` and ignores that line.
 
 ## 6. Start the worldserver and read the log line
 
-Leave `Heimdall.GmIdentities` empty for now — it needs a character that does not exist yet.
+**Set `Heimdall.Enabled = 1`** — it ships `0`, and a disabled module starts silently, with none of
+the lines below. Leave `Heimdall.GmIdentities` empty for now: it needs a character that does not
+exist yet.
 
 ```
 Heimdall schema ready in `heimdall`: 7 tables, schema version 1

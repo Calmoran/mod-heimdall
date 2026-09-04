@@ -11,11 +11,10 @@ module's database to exist. Use a test guild and a test realm for your first ins
 ## 1. Create the Discord application
 
 In the [Developer Portal](https://discord.com/developers/applications), create an application, add
-a bot, and copy its token. Enable all three gateway intents on the Bot page:
-
-- **Guilds** and **Guild Messages** — without them the bot cannot start.
-- **Message Content** (privileged) — **turn this on.** Without it Discord delivers messages with no
-  text, so transcripts fill with authors, timestamps and attachments and no words. Nothing errors.
+a bot, and copy its token. The bot requests the Guilds and Guild Messages intents itself; on the
+Bot page, **enable the privileged Message Content intent.** Without it Discord delivers messages
+with no text, so transcripts fill with authors, timestamps and attachments and no words. Nothing
+errors.
 
 Invite it with this URL, replacing the application id (Developer Portal → **General Information**;
 it is not the token):
@@ -73,69 +72,55 @@ nano .env
 ```
 
 Fill in `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_STAFF_ROLE_IDS`, `MYSQL_PASSWORD` and
-`BOT_INSTANCE_ID` (any name you will recognise in logs, e.g. `lin-heimdall`). Role **ids**, not
-names — your roles can be called anything. Leave `DISCORD_ADMIN_ROLE_IDS` empty and anyone with
-Discord's Manage Server permission is the admin tier.
+`BOT_INSTANCE_ID` (any name you will recognise in logs, e.g. `lin-heimdall`). In Discord, enable
+Developer Mode, then use **Copy Server ID** and **Copy Role ID** — ids, not names. Leave
+`DISCORD_ADMIN_ROLE_IDS` empty and anyone with Discord's Manage Server permission is the admin tier.
 
 ## 4. Install dependencies and start it by hand
 
 ```bash
+node --version          # must be 20 or later
 npm ci --omit=dev
 node src/index.js
 ```
 
-Start it by hand the first time: a missing or wrong value is named explicitly on the first line and
-is far easier to read here than through a service manager. Fix whatever it names, then stop it with
-Ctrl+C.
+Start it by hand first: a missing or wrong value is named on the first line. Fix what it names, then
+stop it with Ctrl+C.
 
 Healthy output ends with `Discord ticket bot ready as <name>` and a line for each channel it
 provisioned.
 
 ## 5. Keep it running
 
-**Linux (systemd)** — paths filled in for the layout at the top of this page:
+**Linux (systemd)** — the shipped unit is written for the layout at the top of this page:
 
 ```bash
-sudo tee /etc/systemd/system/heimdall-bot.service > /dev/null <<'UNIT'
-[Unit]
-Description=Heimdall Discord bot
-After=network-online.target mysql.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=acore
-WorkingDirectory=/home/acore/azerothcore-wotlk/modules/mod-heimdall/bot
-Environment=HEIMDALL_ENV_FILE=/home/acore/azerothcore-wotlk/modules/mod-heimdall/bot/.env
-ExecStart=/usr/bin/node src/index.js
-Restart=on-failure
-RestartSec=15
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+sudo cp deploy/heimdall-bot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now heimdall-bot
 systemctl status heimdall-bot --no-pager
 ```
 
-The same unit ships as `bot/deploy/heimdall-bot.service` if you would rather copy the file.
+If your paths differ, the unit's header names the three lines to change.
 
-**Windows** — `run-bot.cmd` sets `HEIMDALL_ENV_FILE` to the `.env` beside it and starts the bot.
-Run it from a terminal first, then wrap it with NSSM or Task Scheduler so it survives a reboot.
+**Windows** — a launcher note, not a separate install: do steps 1–4 above with Windows paths, then
+`run-bot.cmd` sets `HEIMDALL_ENV_FILE` to the `.env` beside it and starts the bot. Run it from a
+terminal first, then wrap it with NSSM or Task Scheduler so it survives a reboot.
 
-**Docker** — the bot runs as its own container on the Compose network:
+**Docker** — the bot runs as its own container on the Compose network. Set
+`HEIMDALL_BOT_DB_PASSWORD` in the `.env` beside `docker-compose.yml` to the same value as the bot's
+`MYSQL_PASSWORD`; the initializer that creates the database and the account runs only on a **first**
+start with an empty data volume.
 
 ```bash
-cp bot/deploy/docker-compose.bot.yml /path/to/azerothcore-wotlk/docker-compose.override.yml
+cp deploy/docker-compose.bot.yml /home/acore/azerothcore-wotlk/docker-compose.override.yml
+cd /home/acore/azerothcore-wotlk
 docker compose up -d --build
 ```
 
-Inside the network the database is `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`. Three Docker traps —
-the host port collision, the config file the entrypoint does not create, and a restart loop that
-hides its own first error — are in
+Inside the network the database is `MYSQL_HOST=ac-database`, `MYSQL_PORT=3306`. The host port
+collision, the config file the entrypoint does not create, an existing volume, and a restart loop
+that hides its own first error are all in
 [Troubleshooting: Docker](INSTALL-troubleshooting.md#docker).
 
 ## 6. Check it works
