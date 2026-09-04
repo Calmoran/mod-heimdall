@@ -4,15 +4,20 @@ Heimdall bridges in-game GM tickets into private Discord channels. This director
 TrinityCore half of the same repository — the AzerothCore module in `src/` at the repository root
 is the reference implementation, and the two release together under one version.
 
-## Status: phase 1 of several. This is a skeleton.
+## Status: phase 2 of several. Tickets and commands, no GM identity yet.
 
-**It builds into a worldserver, reads one setting, and writes one line at startup. That is all it
-does.** No tickets are polled, no commands are executed, no GM identity is held, nothing is sent
-to Discord, and the companion bot is not involved. Ticket polling, the delivery queue, command
-execution and the GM identity arrive in later phases.
+**What works:** Heimdall creates its own tables, reads `gm_ticket` on a timer and mirrors every
+ticket into its own records, and performs the commands staff press in Discord — Claim, Close,
+Revive, Teleport, Kick, Unstuck — through the core's own command handlers, with the realm's own
+reply captured and reported back.
 
-It is published now so the packaging, the patches and the build steps can be checked by someone
-other than their author.
+**What does not work yet:** the GM identity, and therefore chat. Nothing whispers a player, and a
+player's whisper is not bridged, so a ticket is visible and actionable but not conversational. The
+settings that would configure it are absent rather than present and ignored, and so is the command
+audit — see the end of `conf/heimdall.conf.dist` for why.
+
+`gm_ticket` is read-only to this module and always will be: every change to a ticket is made by
+the core's own `.ticket` handlers, never by SQL.
 
 ## The core it is built against
 
@@ -26,7 +31,7 @@ ships may need more than this; that part is yours.
 ## Installing it
 
 The core has no module system, so Heimdall's source is copied into your core tree and compiled
-into the worldserver. Five steps.
+into the worldserver. Seven steps.
 
 ### 1. Get the repository
 
@@ -57,8 +62,14 @@ Copy the **contents** of `trinitycore/src/` into a new directory in your core tr
 src/server/scripts/Custom/heimdall/
 ```
 
-so that you end up with `src/server/scripts/Custom/heimdall/heimdall.cpp` and
-`heimdall_shared.h`. The core's CMake collects `Custom/` recursively, so no CMake file needs
+so that you end up with all six files under `src/server/scripts/Custom/heimdall/`. Three of them
+are named `mod_heimdall_*` while the rest are named `heimdall_*`, which looks like an oversight and
+is not: those three are byte-identical copies of the AzerothCore module's own headers, shared
+rather than retyped so the schema and the command switch cannot drift between the two cores. A test
+in this repository fails if a copy falls behind, and the copy keeps the original's name because
+that is what "byte-identical" means. Do not edit them here.
+
+The core's CMake collects `Custom/` recursively, so no CMake file needs
 editing — but the collection happens when CMake *configures*, not when it builds, so a new file
 is only picked up after step 5's configure step.
 
@@ -122,14 +133,44 @@ left alone. Two things to know about how this core reads those files:
   and the realm then refuses to start with `'=' character not found in line
   (...heimdall.conf:1)` — a real trap, hit while writing this guide.
 
-`Heimdall.Enabled` defaults to `0`.
+`Heimdall.Enabled` defaults to `0`. Set it to `1`, and set `Heimdall.RealmPrefix` once — it keys
+every ticket this realm ever bridges and must not change afterwards.
+
+### 7. Create the database — the one piece of manual SQL
+
+Heimdall's tables live in a database of their own, so that the companion bot's MySQL account can be
+granted that database and nothing else. The module creates the tables itself at startup, but it
+cannot create the database or grant itself rights on it. Run this once, as a MySQL administrator,
+replacing the account with the one your worldserver connects with (the user in
+`CharacterDatabaseInfo`, with the host MySQL sees it from — over TCP to 127.0.0.1 that is the
+`'127.0.0.1'` account, not `'localhost'`):
+
+```sql
+CREATE DATABASE IF NOT EXISTS `heimdall` DEFAULT CHARACTER SET utf8mb4;
+GRANT ALL PRIVILEGES ON `heimdall`.* TO 'trinity'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+`deploy/create-heimdall-database.sql` at the repository root is the same script with AzerothCore's
+account name in it. If the database is missing or ungranted, Heimdall says so at startup and
+disables itself rather than creating tables somewhere else.
 
 ## Confirming it works
 
-Start the worldserver and look in the console or `Server.log` for:
+Start the worldserver and look in the console or `Server.log`. With the bridge off you get one
+line:
 
 ```
 Heimdall 2.0.0 for TrinityCore: the bridge is DISABLED. Set Heimdall.Enabled = 1 in heimdall.conf to turn it on.
+```
+
+With `Heimdall.Enabled = 1` you should see the schema line, the enabled line and the resolved
+configuration:
+
+```
+Heimdall schema ready in `heimdall`: 7 tables, schema version 1 (created on this start).
+Heimdall 2.0.0 enabled for realm tag "TRIN"; gm_ticket polling is read-only. First run: seeded a new watermark with import mode "open".
+Resolved configuration: ticket poll 15s, delivery poll 1s, archive retention 180 day(s), command audit unavailable on this core. ...
 ```
 
 If you see no Heimdall line at all, the most likely cause is that `heimdall.conf` was not
@@ -137,9 +178,6 @@ installed: the `Logger.heimdall` line that makes Heimdall's output visible lives
 this core's stock `root` logger is at level 5 (error) and an unconfigured category inherits from
 it. A missing config file also makes the core warn that `Heimdall.Enabled` is missing, which is
 the other thing to look for.
-
-With `Heimdall.Enabled = 1` the line instead says the bridge is enabled and that this build is the
-phase 1 skeleton — because at this phase, enabling it still does nothing.
 
 ## Licence
 
