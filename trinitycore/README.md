@@ -4,20 +4,40 @@ Heimdall bridges in-game GM tickets into private Discord channels. This director
 TrinityCore half of the same repository — the AzerothCore module in `src/` at the repository root
 is the reference implementation, and the two release together under one version.
 
-## Status: phase 2 of several. Tickets and commands, no GM identity yet.
+## Status: feature-complete except the command audit, with one unproven gate
 
 **What works:** Heimdall creates its own tables, reads `gm_ticket` on a timer and mirrors every
-ticket into its own records, and performs the commands staff press in Discord — Claim, Close,
-Revive, Teleport, Kick, Unstuck — through the core's own command handlers, with the realm's own
-reply captured and reported back.
+ticket into its own records, performs the commands staff press in Discord — Claim, Close, Revive,
+Teleport, Kick, Unstuck — through the core's own command handlers, and carries the conversation
+both ways: a GM's reply reaches the player as an ordinary whisper carrying the `<GM>` badge, and
+the player's answer reaches the ticket channel.
 
-**What does not work yet:** the GM identity, and therefore chat. Nothing whispers a player, and a
-player's whisper is not bridged, so a ticket is visible and actionable but not conversational. The
-settings that would configure it are absent rather than present and ignored, and so is the command
-audit — see the end of `conf/heimdall.conf.dist` for why.
+**What is not here:** the GM command audit, which records who asked for each command. Doing that
+faithfully needs a pre-command hook this core does not have, and a partial audit is worse than
+none — see the end of `conf/heimdall.conf.dist`.
+
+**What is not yet proven — read this before running it on a live realm.** If a player logs in on a
+character Heimdall is currently holding as a GM identity, the module stands down and hands the
+character back (`heimdall_login_watch` in `src/heimdall.cpp`). The design is sound and it runs
+earlier than the AzerothCore equivalent, but it has **not** been observed with a real game client,
+because the development realm has none. Until it has, treat a GM identity as a character nobody
+logs into.
 
 `gm_ticket` is read-only to this module and always will be: every change to a ticket is made by
 the core's own `.ticket` handlers, never by SQL.
+
+### One place this core is thinner than AzerothCore
+
+Before Heimdall logs a GM identity in, it refuses if anyone is connected on that account or if the
+character is already in the world. On AzerothCore it can also ask the core about a session that has
+been closed but whose character has not finished leaving; **TrinityCore keeps no such record**, so
+that question cannot be asked here.
+
+In practice: if a real player disconnects from a GM identity's character and an identity login is
+requested in the same few seconds, Heimdall may not see that the character is still on its way out
+of the world. Nothing else in normal operation reaches that window — an identity is logged in
+deliberately, by a GM or at startup, not automatically on a timer. If it matters to you, wait a few
+seconds after disconnecting a GM identity's character before holding it.
 
 ## The core it is built against
 

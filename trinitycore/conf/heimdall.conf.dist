@@ -15,9 +15,8 @@
 #     and the parser then reports "'=' character not found in line (...heimdall.conf:1)" and the
 #     realm does not start.
 #
-# THIS IS THE PHASE 2 PORT. Tickets are polled and Discord's commands are executed. GM identities
-# and whispers are not here yet: a reply typed in Discord has nothing to speak through until phase
-# 3, and the settings that configure it are absent rather than present and ignored.
+# This build carries the whole bridge except the GM command audit, which this core cannot support
+# faithfully - see the end of this file.
 ###################################################################################################
 
 [worldserver]
@@ -72,12 +71,36 @@ Heimdall.ArchiveRetentionDays = 180
 # How often the player card behind an open ticket is refreshed, in seconds. Minimum 10.
 Heimdall.ContextRefreshSeconds = 15
 
-# NOT AVAILABLE IN THIS RELEASE, and absent rather than present-and-ignored:
+# The characters Heimdall may log in headlessly and speak as - a comma-separated list of character
+# names that exist on this realm. This is a consent list, and it is the only way a name becomes one
+# Heimdall will act for: a name arriving from Discord that is not here resolves to no held identity
+# and the reply is refused.
 #
-#   Heimdall.GmIdentities, Heimdall.MaxWhisperBytes, Heimdall.GmChatTag
-#       The GM identity and whisper bridging arrive in the next release. Until then a ticket's chat
-#       is one-way: what a player writes in game is not bridged, and a Discord reply has no
-#       identity to speak through.
+# Each name must be a real character on this realm. The account behind a name that will CLAIM
+# tickets also needs the "be assigned tickets" permission, which security level 1 (Moderator) and
+# above have by default - .ticket assign checks the account's RBAC permission, not the character.
+#
+# Whispering needs no permission at all, which is why a plain account looks healthy right up until
+# the first Claim.
+#
+# Empty by default: with no identity configured, tickets still reach Discord and commands still
+# work, but nobody can whisper a player and no identity can be logged in.
+Heimdall.GmIdentities = ""
+
+# Whether a whisper from a GM identity carries the client's <GM> badge. On by default: the badge is
+# a protocol flag a player character cannot forge, so it is how a player knows the reply is really
+# from a Game Master. A server running an in-character support desk can turn it off.
+Heimdall.GmChatTag = 1
+
+# The most bytes a single whisper may carry, 32-255.
+#
+# HONEST NOTE: this setting currently does nothing on either core. The module reads it, clamps it
+# and prints it at startup; the splitting of a long reply is done by the companion bot from its own
+# constant. It is kept here so both halves have the same configuration shape, and making it do
+# something (or removing it from both) is a change that belongs to both cores at once.
+Heimdall.MaxWhisperBytes = 240
+
+# NOT AVAILABLE IN THIS RELEASE, and absent rather than present-and-ignored:
 #
 #   Heimdall.CommandAudit*
 #       The AzerothCore module can log every GM command with the Discord user who caused it. Doing

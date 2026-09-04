@@ -53,8 +53,17 @@ struct Settings
     // the module gives up on is buried exactly as one the bot gives up on.
     uint32 deliveryMaxAttempts = 12;
     uint32 archiveRetentionDays = 180;
+    // Read, clamped and printed in the resolved-configuration line - and never used to limit
+    // anything, exactly as on AzerothCore, where the module reads it and the bot does its own
+    // splitting from its own constant. Ported for parity rather than for effect; making it do
+    // something, or removing it, is a change for both halves.
+    uint32 maxWhisperBytes = 240;
     std::string realmPrefix;
     std::string realmTag;
+    // The operator's consent list: the only characters this module may hold and speak as. It
+    // stays in the config on purpose - a name that reaches the module any other way is not
+    // consented to.
+    std::string gmIdentities;
     // What the very first poll on a realm does with the ticket history already in gm_ticket:
     // "open", "none" or "all". Only ever consulted when no watermark row exists yet.
     std::string firstRunImport = "open";
@@ -65,12 +74,11 @@ struct Settings
     // that enabling it later is a config key, not a rewrite.
     bool commandAuditEnabled = false;
     uint32 contextRefreshSeconds = 60;
-
-    // NOT PORTED IN PHASE 2, and deliberately absent rather than present-and-ignored:
-    //   gmIdentities        - the consent list, meaningless until the identity registry exists
-    //   maxWhisperBytes     - the whisper half of the delivery queue
-    //   gmChatTag           - the <GM> badge on identity whispers
-    // All three arrive in phase 3 with the code that gives them meaning.
+    // Whether whispers from a GM identity carry the client's <GM> chat badge. On by default: the
+    // badge is a protocol flag a player character cannot forge, so it is both how a player knows
+    // the reply is really from a Game Master and the one part of the exchange an impersonator
+    // cannot reproduce. A server running an in-character support desk can turn it off.
+    bool gmChatTag = true;
 };
 
 // Shared so every part reads the same configuration without one owning the other.
