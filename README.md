@@ -37,51 +37,35 @@ One repository, two halves: the server module (compiled into your worldserver) a
 - Node.js 20 or later (for the companion bot)
 - A Discord bot application you control
 
-## How to install
+## Quickstart
 
-### 1) Clone the module
+Full instructions: [`docs/INSTALL.md`](docs/INSTALL.md) for the module,
+[`docs/INSTALL-bot.md`](docs/INSTALL-bot.md) for the bot. Both assume AzerothCore at
+`/home/acore/azerothcore-wotlk`.
 
-Clone this repository into your core's `modules/` directory:
+```bash
+# 1. clone into the core's modules/ and apply the core patch
+cd /home/acore/azerothcore-wotlk/modules
+git clone --branch master https://github.com/Calmoran/mod-heimdall.git
+cd .. && git apply modules/mod-heimdall/patches/0001-expose-loginqueryholder-to-modules.patch
 
-```
-cd azerothcore-wotlk/modules
-git clone https://github.com/Calmoran/mod-heimdall.git
-```
+# 2. rebuild the worldserver with modules enabled
+./acore.sh compiler build
 
-### 2) Apply the core patch
+# 3. create Heimdall's own database (its tables install themselves at startup)
+sudo mysql < modules/mod-heimdall/deploy/create-heimdall-database.sql
 
-From the root of your core checkout:
+# 4. install the config, then start the worldserver
+cp modules/mod-heimdall/conf/heimdall.conf.dist env/dist/etc/modules/heimdall.conf
 
-```
-git apply modules/mod-heimdall/patches/0001-expose-loginqueryholder-to-modules.patch
-```
-- NOTE: We borrow a change made by MOD PLAYERBOTS that allows an account to log in headless, which is what enables this module to work. The patch moves the `LoginQueryHolder` class declaration from `CharacterHandler.cpp` to `WorldSession.h` that lets your staff members GM character be logged in through the bot which enables the two way communication between player and GM
-
-### 3) Re-run CMake and rebuild
-
-```
-cd azerothcore-wotlk
-cmake -S . -B build -DMODULES=static
-cmake --build build --config Release
+# 5. install the bot
+cd modules/mod-heimdall/bot && cp .env.example .env && chmod 600 .env
+npm ci --omit=dev && node src/index.js
 ```
 
-Confirm the configure output lists `mod-heimdall` before building.
-
-### 4) Database
-
-Create Heimdall's own database on the realm's MySQL server and give the core's user rights on it - `deploy/create-heimdall-database.sql` does both. The tables install themselves: on startup the module creates its seven `heimdall_*` tables there from `deploy/heimdall-schema.sql` and touches nothing else.
-
-### 5) Configuration
-
-Copy `conf/heimdall.conf.dist` to your worldserver's module config directory as `heimdall.conf` (next to `worldserver.conf`, e.g. `.../etc/modules/heimdall.conf`) and edit it.
-
-Edit `heimdall.conf`, never the `.conf.dist` — the build overwrites `.dist` files on every compile.
-
-Leave `Heimdall.Enabled = 0` until the bot is installed and configured, then set it to `1` and restart the worldserver.
-
-### 6) Install the bot
-
-Follow [`docs/INSTALL-bot.md`](docs/INSTALL-bot.md) from this same clone's `bot/` directory.
+Two things the guides will tell you that are worth knowing now: the GM identity needs an account at
+**gmlevel 1** or claiming fails much later with a misleading error, and the bot needs Discord's
+**Message Content** intent or transcripts arrive with no words in them.
 
 ## Community
 

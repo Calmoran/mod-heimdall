@@ -140,6 +140,21 @@ Nothing here needs configuring. It is written down because your staff will notic
 
 ### Documentation
 
+- **The install guides are rewritten short.** `INSTALL.md` goes from 318 lines to 140 and
+  `INSTALL-bot.md` from 421 to 157: numbered steps, each a command block you can paste whole, with
+  one canonical example layout instead of placeholders. Everything exiled - the build traps, the
+  Docker specifics, the grant and permission failures - moves to a new
+  `docs/INSTALL-troubleshooting.md`, organised by the symptom you would search for. Upgrading and
+  moving to another guild move to `OPERATIONS.md`. Four instructions that were simply wrong on a
+  clean Linux box are corrected: the config path, the missing `acore.sh` build path,
+  `mysql -u root -p` where the platform needs `sudo mysql`, and `Heimdall.log` referred to as
+  though it exists without the two appender lines that create it.
+- **The shipped `bot/deploy/heimdall-bot.service` now matches the documented install.** It assumed
+  `/opt/heimdall-bot` with `ProtectHome=true`, so a bot left where step 1 of the module guide puts
+  it - under `/home` - ran by hand and failed under systemd.
+- `bot/.env.example` lists the admin role variable above the staff one, the way Discord lists
+  roles, and `BOT_INSTANCE_ID` finally says what it is for.
+
 - `docs/SECURITY.md` states the database boundary and, new, the supply-chain posture: nothing
   here updates itself, a release reaches a realm only when its operator pulls it, and the database
   boundary is what contains a bad one, with the grants as the fallback behind it.

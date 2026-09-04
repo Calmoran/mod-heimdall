@@ -151,10 +151,86 @@ attachments.
 
 ## Upgrade
 
-Read the release notes, back up, stop the bot, apply any SQL a release ships,
-update the module and bot code, install production dependencies,
-validate the environment file, then start the bot and inspect its logs. Perform one
-Discord-native and one in-game ticket smoke test.
+1. Read the release notes. Back up Heimdall's database and the archive directory.
+2. **Stop the bot cleanly** — Ctrl+C or `systemctl stop`, not a force-kill. A clean stop releases
+   the single-instance lock at once; a force-kill leaves it held until a 60-second staleness window
+   expires, and the new bot says so while it waits.
+3. `git pull` — one clone, both halves, so they cannot drift apart.
+4. `npm ci --omit=dev` in `bot/`.
+5. **Reapply the core patch if you also updated the core.** An update can revert it; forgetting
+   shows up as a compile failure, not as odd behaviour.
+6. **Rebuild the worldserver if the module changed** — anything under `modules/mod-heimdall/src`
+   or its `.conf.dist`. A bot-only release needs no rebuild; the release notes say which.
+7. Diff your `heimdall.conf` against the new `heimdall.conf.dist`, and your `.env` against
+   `.env.example`. A release that adds an option leaves your file without it, so the new option
+   runs silently at its shipped default.
+8. Start the worldserver, then the bot, and read both logs. The bot's permissions preflight names
+   anything missing.
+9. Smoke test one Discord ticket and one in-game ticket.
+
+Before starting the new bot, check nothing is left running: older versions could not detect a
+second copy of themselves, and the symptom is every action happening twice. On Windows,
+`Get-CimInstance Win32_Process -Filter "Name='node.exe'"` lists them.
+
+## Rebuilding after a core update
+
+Any change under `src/` needs a reconfigure and rebuild — the module is statically linked and there
+is no plugin to swap. Confirm the installed `worldserver` binary is newer than the module source
+before testing a change; a stale binary produces results that look like configuration bugs.
+
+If you copied the repository into `modules/` rather than linking it, copy it again after every
+source change. A copy does not track the original, so the build recompiles the old code and
+succeeds.
+
+## Keeping the clone outside the core tree
+
+AzerothCore discovers modules in `modules/`, which puts this repository inside someone else's — and
+the core's `.gitignore` excludes `modules/*`, so every core update is a chance to lose it. Link it
+in instead:
+
+```bash
+ln -s /path/to/mod-heimdall /path/to/azerothcore-wotlk/modules/mod-heimdall
+```
+
+```
+mklink /J "C:\path\to\azerothcore-wotlk\modules\mod-heimdall" "C:\path\to\mod-heimdall"
+```
+
+CMake follows the link, so the module is discovered and compiled exactly as if it were a real
+directory. Reconfigure after creating it.
+
+## Moving Heimdall to a different guild
+
+Supported, with one loss: every ticket row records the Discord channel it was given, and those ids
+belong to the old guild. **Open tickets rebuild themselves** on the next poll. **Closed tickets do
+not** — their channels stay behind in the old guild. The transcripts are in `heimdall_event` and
+the archive rather than in Discord, so nothing is lost except the old channels; export them first
+if they matter to you.
+
+1. Stop the bot and back up the `heimdall_*` tables.
+2. Invite the application to the new guild and create your staff and admin roles there. Do not
+   create a role for the bot.
+3. Update `DISCORD_GUILD_ID` and the role id lists in `.env`, and blank any pinned channel or
+   category id back to its placeholder — a pinned id naming a channel in the old guild stops the
+   bot from starting.
+4. Clear the stored layout and the deletions that can no longer succeed:
+
+   ```sql
+   DELETE FROM heimdall_setting WHERE setting_key LIKE 'discord.%';
+   DELETE FROM heimdall_delivery WHERE kind = 'delete_channel' AND state <> 'delivered';
+   ```
+
+5. Optionally clear stale channel ids on closed tickets:
+
+   ```sql
+   UPDATE heimdall_ticket SET discord_channel_id = NULL WHERE status IN ('closed', 'cancelled');
+   ```
+
+6. Start the bot. It provisions the new layout and prints the ids; open tickets get their channels
+   back within `Heimdall.TicketPollSeconds`.
+
+Do not run two bots against two guilds by copying the `.env` — both would answer the same tickets,
+and the instance lock stops the second, which is the intended outcome but not a way to migrate.
 
 ## Rollback
 
@@ -190,4 +266,4 @@ audit records until the incident is understood.
   `account_access`, never the session, and the message names neither the real
   cause nor the right thing to check. Set it from the worldserver console with
   `account set gmlevel <account name> 1 -1`; the retrying job then succeeds on
-  its own. Full entry in `docs/INSTALL.md`.
+  its own. Full entry in `docs/INSTALL-troubleshooting.md`.

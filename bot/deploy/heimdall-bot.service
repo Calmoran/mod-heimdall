@@ -1,31 +1,44 @@
+# Heimdall Discord bot, for the layout the install guide documents: the clone lives in the core's
+# modules/ directory and the bot runs as the same user as the worldserver.
+#
+# Change these three lines and nothing else:
+#   User=                 the account that owns the clone
+#   WorkingDirectory=     .../modules/mod-heimdall/bot
+#   Environment=          the same path plus /.env
+#
+# Install:
+#   sudo cp bot/deploy/heimdall-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now heimdall-bot
+#
+# Earlier releases shipped a unit assuming /opt/heimdall-bot with ProtectHome=true, which cannot
+# read a clone under /home: it ran by hand and failed under systemd. If you moved the bot to /opt
+# deliberately, set the three paths below to match and add ProtectHome=true back.
+
 [Unit]
-Description=AzerothCore Discord Tickets Bot
-Wants=network-online.target
+Description=Heimdall Discord bot
 After=network-online.target mysql.service
+Wants=network-online.target
 
 [Service]
-Type=exec
-User=heimdall
-Group=heimdall
-WorkingDirectory=/opt/heimdall-bot
-Environment=HEIMDALL_ENV_FILE=/etc/heimdall-bot/heimdall.env
-ExecStart=/usr/bin/node /opt/heimdall-bot/src/index.js
+Type=simple
+User=acore
+WorkingDirectory=/home/acore/azerothcore-wotlk/modules/mod-heimdall/bot
+Environment=HEIMDALL_ENV_FILE=/home/acore/azerothcore-wotlk/modules/mod-heimdall/bot/.env
+ExecStart=/usr/bin/node src/index.js
 Restart=on-failure
-RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+# Hardening that does not depend on where the bot lives. The bot opens no listener; it connects out
+# to Discord and locally to MySQL.
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/heimdall
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=
-AmbientCapabilities=
-LockPersonality=true
-MemoryDenyWriteExecute=true
 RestrictSUIDSGID=true
+LockPersonality=true
 SystemCallArchitectures=native
 
 [Install]
