@@ -98,6 +98,16 @@ Nothing here needs configuring. It is written down because your staff will notic
   and replies are whispered to the ticket's character by GUID. Reported by **@AbyssalJake**; the
   full account is under "Fixed findings" in `docs/SECURITY.md`.
 
+### Fixed
+
+- **A fresh `npm ci` in `bot/` has been failing since 1.1.3, and now works.** That release bumped
+  the bot's version by replacing `1.1.2` throughout `package-lock.json`, which also rewrote the
+  entry for `aws-ssl-profiles` - a transitive dependency that happened to sit at the same version -
+  to a 1.1.3 that has never been published. Any install starting from an empty `node_modules`
+  stopped with `npm error code ETARGET`, including the Docker image build; a machine that already
+  had the packages never saw it. The lockfile is regenerated rather than patched, so all 35 entries
+  carry `resolved` and `integrity` again, and `mysql2` moves to 3.24.3.
+
 ### Changed
 
 - **Heimdall has a database of its own.** The seven `heimdall_*` tables now live in a database
