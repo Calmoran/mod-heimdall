@@ -12,10 +12,16 @@
     "start": "node src/index.js",
     "test": "node --test",
     "diagnose": "node src/diagnose.js",
-    "check": "node --check src/index.js && node --check src/discord.js && node --check src/repository.js && node --check src/domain.js && node --check src/config.js && node --check src/env.js && node --check src/diagnose.js"
+    "check": "node --check src/index.js && node --check src/discord.js && node --check src/repository.js && node --check src/domain.js && node --check src/config.js && node --check src/env.js && node --check src/diagnose.js",
+    "lint": "eslint src test"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
     "mysql2": "^3.11.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0"
   }
 }
