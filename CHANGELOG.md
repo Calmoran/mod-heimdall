@@ -3,7 +3,7 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
-## 2.0.0 — 2026-09-02
+## 2.0.0 — 2026-09-04
 
 Heimdall's tables leave the realm's characters database, and the ticket channel is rebuilt around
 what a GM actually does in it. This is a major version because it changes the one sentence that

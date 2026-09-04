@@ -4,12 +4,12 @@
 [![Release](https://img.shields.io/github/v/release/Calmoran/mod-heimdall)](https://github.com/Calmoran/mod-heimdall/releases)
 ![Windows](https://img.shields.io/badge/Windows-tested-brightgreen)
 ![Linux](https://img.shields.io/badge/Linux-tested-brightgreen)
-![Docker](https://img.shields.io/badge/Docker-tested-brightgreen)
+![Docker](https://img.shields.io/badge/Docker-v1.1.2-yellow)
 
 [![core-build](https://github.com/Calmoran/mod-heimdall/actions/workflows/core-build.yml/badge.svg)](https://github.com/Calmoran/mod-heimdall/actions)
 
 > [!IMPORTANT]
-> **Verified end to end at v1.1.2 on Windows, Linux and Docker.**
+> **Verified end to end at v2.0.0 on Windows and Linux. Docker last verified at v1.1.2.**
 
 Heimdall is **A Discord ticket system for AzerothCore.** Heimdall bridges in-game GM tickets into private Discord channels your staff can work in, and gives your staff full two way communication with ingame players, from beginning to end of the ticket life. From the player point of view, nothing has changed. They still communicate with a GM Branded chat window, and send and receive whispers from ingame.
 
