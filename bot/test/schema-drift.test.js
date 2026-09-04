@@ -60,3 +60,18 @@ test('every table name in the schema is bare, so the module can qualify it', () 
   assert.doesNotMatch(schemaSql, /`heimdall_/, 'backquoted table name in heimdall-schema.sql')
   assert.doesNotMatch(schemaSql, /\w\.heimdall_/, 'database-qualified table name in heimdall-schema.sql')
 })
+
+// The TrinityCore port compiles three of the module's headers unchanged: they depend on the
+// standard library and nothing else, so both cores can share the same source. Sharing by copy is
+// only safe if something checks the copies, and two of these carry more than convenience -
+// mod_heimdall_schema_ddl.h is the schema, and mod_heimdall_command.h is the fixed command switch
+// that resolves WHO and WHICH TICKET from the module's own row. A copy that quietly fell behind
+// would put a different security shape on one core. tools/sync-tc-shared.mjs refreshes them.
+for (const name of ['mod_heimdall_qualify.h', 'mod_heimdall_command.h', 'mod_heimdall_schema_ddl.h']) {
+  test(`trinitycore/src/${name} is byte-identical to src/${name}`, () => {
+    const original = fs.readFileSync(path.join(ROOT, 'src', name))
+    const copy = fs.readFileSync(path.join(ROOT, 'trinitycore', 'src', name))
+    assert.ok(original.equals(copy),
+      `trinitycore/src/${name} differs from src/${name} - run: node tools/sync-tc-shared.mjs`)
+  })
+}

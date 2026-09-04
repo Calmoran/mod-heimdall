@@ -1,65 +1,1090 @@
 /*
- * Heimdall for TrinityCore - phase 1 skeleton.
+ * Heimdall for TrinityCore - the ticket poller and the realm-bound half of the delivery queue.
  *
  * Copyright (C) Calmoran. Licensed under the GNU AGPL v3 (see LICENSE at the repository root).
  *
- * This file does exactly one thing: read Heimdall.Enabled and say so at startup. There is no
- * polling, no database, no delivery queue, no GM identity and no contact with Discord - those
- * arrive in later phases. It exists to prove the packaging works: that a script pack in
- * src/server/scripts/Custom compiles into a stock ElunaTrinityWotlk worldserver, that its
- * settings are read from an additional config file, and that its output reaches the log.
- *
- * Reference implementation: the AzerothCore module in src/ at the repository root.
- * Divergences from it so far, each forced by this core:
- *   - No module loader of its own. AzerothCore discovers modules; TrinityCore builds custom
- *     scripts into the worldserver and calls one function from custom_script_loader.cpp, which
- *     is why AddSC_heimdall() below is what an adopter wires up by hand.
- *   - Settings live in an additional config file loaded from worldserver.conf.d rather than in
- *     a modules config directory (see trinitycore/conf/heimdall.conf.dist).
+ * Ported from src/mod_heimdall.cpp, which is the reference implementation. This file is a port,
+ * not a redesign: where it differs, a comment says which core behaviour forced it. Phase 2 covers
+ * everything that needs no GM identity and no live player session - the schema, the gm_ticket
+ * poll, and the command channel. The GM identity, the headless session, whisper capture and the
+ * whisper half of the delivery queue are phase 3, and every place they would be called is marked.
  */
 
-#include "heimdall_shared.h"
-
+#include "CharacterCache.h"
+#include "Chat.h"
+#include "Common.h"
 #include "Config.h"
+#include "DatabaseEnv.h"
+#include "GameTime.h"
 #include "Log.h"
+#include "MySQLConnection.h"
+#include "ObjectAccessor.h"
+#include "ObjectMgr.h"
+#include "Optional.h"
+#include "Player.h"
+#include "QueryResult.h"
+#include "Realm.h"
 #include "ScriptMgr.h"
+#include "SharedDefines.h"
+#include "StringConvert.h"
+#include "World.h"
+
+#include "heimdall_shared.h"
+#include "mod_heimdall_command.h"
+
+#include <algorithm>
+#include <cctype>
+#include <map>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+using namespace Heimdall;
+
+namespace Heimdall
+{
+// One instance for the whole module.
+Settings& CurrentSettings()
+{
+    static Settings settings;
+    return settings;
+}
+
+std::string Escape(std::string value)
+{
+    CharacterDatabase.EscapeString(value);
+    return value;
+}
 
 namespace
 {
-    bool _enabled = false;
-}
-
-class heimdall_world : public WorldScript
+// A console handler that keeps what the command printed instead of writing it to a terminal.
+// The core replies to a refused command by printing the reason - "Ticket not found.", a syntax
+// line - so this text is the only account of what happened, and it is what the delivery row and
+// the Discord dead-letter end up quoting.
+class CapturingCliHandler final : public CliHandler
 {
 public:
-    heimdall_world() : WorldScript("heimdall_world") { }
+    CapturingCliHandler() : CliHandler(this, &CapturingCliHandler::Collect) { }
 
-    // Runs during World::LoadConfigSettings, before OnStartup, and again on a config reload.
-    void OnConfigLoad(bool /*reload*/) override
+    [[nodiscard]] std::string const& Output() const { return _output; }
+
+private:
+    static void Collect(void* self, std::string_view text)
     {
-        _enabled = sConfigMgr->GetBoolDefault("Heimdall.Enabled", false);
+        static_cast<CapturingCliHandler*>(self)->_output.append(text);
     }
+
+    std::string _output;
+};
+}
+
+// Deliberately the console path and not a private shortcut: the core's own parser resolves the
+// command, the core's own handler performs it, and every rule it enforces still applies.
+//
+// The safety of this rests entirely on the caller: `command` is composed by PollGameCommands from
+// a fixed set of actions, never from a string the bot supplied. That property is what makes a
+// compromised bot unable to express ".ban" - not this function.
+bool RunRealmCommand(std::string const& command, std::string& output)
+{
+    CapturingCliHandler handler;
+    bool parsed = handler.ParseCommands(command);
+
+    output = handler.Output();
+    // Trim the trailing newlines CliHandler::SendSysMessage appends after every line.
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+        output.pop_back();
+
+    // ParseCommands answers "was this text a command at all", which stays true for a command that
+    // refused its arguments; the handler's error flag is what separates the two.
+    return parsed && !handler.HasSentErrorMessage();
+}
+}
+
+namespace
+{
+
+// Matches realm_tag VARCHAR(16). The automatic fallback tag needs four characters at most:
+// worldserver refuses a RealmID above 255 (the client reads it as a uint8), so the widest fallback
+// is "R255". The rest of the width is headroom for a hand-written prefix.
+constexpr std::size_t REALM_TAG_MAX_LENGTH = 16;
+
+// The companion bot mints its own Discord-sourced keys as DIS-000042. An in-game key of
+// DIS-42 would not actually collide, but the ambiguity is not worth shipping.
+constexpr char const* RESERVED_REALM_TAG = "DIS";
+
+// How long a leased to_game job stays claimed before another pass may recover it.
+constexpr uint32 DELIVERY_LEASE_SECONDS = 60;
+
+// Matches ^[A-Za-z0-9]{1,16}$. Written out rather than using std::isalnum, which is locale
+// dependent and would accept characters the key format cannot carry.
+bool IsValidRealmTag(std::string_view tag)
+{
+    if (tag.empty() || tag.length() > REALM_TAG_MAX_LENGTH)
+        return false;
+
+    return std::all_of(tag.begin(), tag.end(), [](char c)
+    {
+        return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    });
+}
+
+bool IsReservedRealmTag(std::string_view tag)
+{
+    return tag.length() == std::string_view(RESERVED_REALM_TAG).length()
+        && std::equal(tag.begin(), tag.end(), RESERVED_REALM_TAG, [](char lhs, char rhs)
+        {
+            return std::tolower(static_cast<unsigned char>(lhs)) == std::tolower(static_cast<unsigned char>(rhs));
+        });
+}
+
+Settings ReadSettings()
+{
+    // DIVERGENCE (core): AzerothCore's ConfigMgr has a template GetOption<T>; TrinityCore has
+    // typed getters (GetBoolDefault / GetIntDefault / GetStringDefault) and no template. Same
+    // keys, same defaults, same clamps - only the accessor differs.
+    Settings settings;
+    settings.enabled = sConfigMgr->GetBoolDefault("Heimdall.Enabled", false);
+    settings.ticketPollSeconds = std::max<uint32>(1, uint32(sConfigMgr->GetIntDefault("Heimdall.TicketPollSeconds", 15)));
+    settings.deliveryPollSeconds = std::max<uint32>(1, uint32(sConfigMgr->GetIntDefault("Heimdall.DeliveryPollSeconds", 1)));
+    settings.deliveryMaxAttempts = std::clamp<uint32>(uint32(sConfigMgr->GetIntDefault("Heimdall.DeliveryMaxAttempts", 12)), 1, 100);
+    settings.archiveRetentionDays = std::max<uint32>(1, uint32(sConfigMgr->GetIntDefault("Heimdall.ArchiveRetentionDays", 180)));
+    settings.realmPrefix = sConfigMgr->GetStringDefault("Heimdall.RealmPrefix", "");
+    settings.firstRunImport = sConfigMgr->GetStringDefault("Heimdall.FirstRunImport", "open");
+    std::transform(settings.firstRunImport.begin(), settings.firstRunImport.end(), settings.firstRunImport.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (settings.firstRunImport != "open" && settings.firstRunImport != "none" && settings.firstRunImport != "all")
+    {
+        TC_LOG_ERROR(HEIMDALL_LOG, "Heimdall.FirstRunImport \"{}\" is not one of open, none or all. Using \"open\".",
+            settings.firstRunImport);
+        settings.firstRunImport = "open";
+    }
+    settings.contextRefreshSeconds = std::max<uint32>(10, uint32(sConfigMgr->GetIntDefault("Heimdall.ContextRefreshSeconds", 15)));
+    settings.database = sConfigMgr->GetStringDefault("Heimdall.Database", "heimdall");
+
+    // NOT READ IN PHASE 2, because nothing on this core would act on them yet:
+    // Heimdall.GmIdentities, Heimdall.MaxWhisperBytes, Heimdall.GmChatTag (phase 3, the identity),
+    // and the Heimdall.CommandAudit* family (no faithful audit hook on this core - see
+    // Settings::commandAuditEnabled in heimdall_shared.h).
+
+    // An operator who never reads the docs still gets working, realm-unique keys.
+    settings.realmTag = settings.realmPrefix.empty()
+        ? "R" + std::to_string(realm.Id.Realm)
+        : settings.realmPrefix;
+
+    return settings;
+}
+
+std::string EventKey(std::string const& realmTag, uint32 ticketId, uint32 modifiedTime, std::string_view eventType)
+{
+    std::ostringstream key;
+    key << "ingame:" << realmTag << ':' << ticketId << ':' << modifiedTime << ':' << eventType;
+    return key.str();
+}
+
+void RecordIngameTicket(std::string const& realmTag, uint32 ticketId, uint64 playerGuid, std::string const& playerName,
+    std::string const& description, uint32 modifiedTime, bool completed, uint32 retentionDays)
+{
+    // The auth account behind the character, so ticket history and player notes follow the player
+    // across alts. Read from the in-memory character cache rather than querying `characters`, and
+    // never exposed to the bot's database grants.
+    uint32 playerAccountId = playerGuid
+        ? sCharacterCache->GetCharacterAccountIdByGuid(ObjectGuid::Create<HighGuid::Player>(playerGuid))
+        : 0;
+
+    std::string escapedRealmTag = Escape(realmTag);
+    std::string escapedName = Escape(playerName);
+    std::string escapedDescription = Escape(description);
+    std::string escapedPublicKey = Escape(realmTag + "-" + std::to_string(ticketId));
+    std::string escapedEventKey = Escape(EventKey(realmTag, ticketId, modifiedTime, completed ? "state" : "observed"));
+    CharacterDatabaseTransaction transaction = CharacterDatabase.BeginTransaction();
+
+    // gm_ticket is deliberately absent from every mutation below. Any lifecycle change is made by
+    // the core's own .ticket handlers through the command channel, never by SQL.
+    std::string const ticketSql = Qf(
+        "INSERT INTO heimdall_ticket "
+        "(source, realm_tag, source_ticket_id, source_modified_time, public_key, player_guid, player_account_id, player_name, category, status) "
+        "VALUES ('ingame', '{}', {}, {}, '{}', {}, {}, '{}', 'support', IF({} = 1, 'closed', 'open')) "
+        "ON DUPLICATE KEY UPDATE player_guid = VALUES(player_guid), player_name = VALUES(player_name), "
+        "player_account_id = VALUES(player_account_id), "
+        "source_modified_time = VALUES(source_modified_time), "
+        "status = IF(VALUES(status) = 'closed', 'closed', status), "
+        "closed_at = IF(VALUES(status) = 'closed', COALESCE(closed_at, CURRENT_TIMESTAMP), closed_at), "
+        "transcript_expires_at = IF(VALUES(status) = 'closed', COALESCE(transcript_expires_at, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL {} DAY)), transcript_expires_at), "
+        "version = version + 1",
+        escapedRealmTag, ticketId, modifiedTime, escapedPublicKey, playerGuid, playerAccountId, escapedName,
+        completed ? 1 : 0, retentionDays);
+    transaction->Append(ticketSql.c_str());
+
+    std::string const eventSql = Qf(
+        "INSERT IGNORE INTO heimdall_event "
+        "(ticket_id, event_key, event_type, actor_kind, actor_ref, payload_json) "
+        "SELECT id, SHA2('{}', 256), '{}', 'player', '{}', JSON_OBJECT('description', '{}', 'modifiedTime', {}) "
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}",
+        escapedEventKey, completed ? "ingame_ticket_closed" : "ingame_ticket_observed",
+        escapedName, escapedDescription, modifiedTime, escapedRealmTag, ticketId);
+    transaction->Append(eventSql.c_str());
+
+    std::string const deliverySql = Qf(
+        "INSERT IGNORE INTO heimdall_delivery "
+        "(ticket_id, delivery_key, direction, kind, payload_json) "
+        "SELECT id, SHA2(CONCAT('{}', ':discord'), 256), 'to_discord', 'sync_ingame_ticket', "
+        "JSON_OBJECT('realmTag', '{}', 'sourceTicketId', {}, 'playerName', '{}', 'description', '{}', 'completed', {}) "
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {}",
+        escapedEventKey, escapedRealmTag, ticketId, escapedName, escapedDescription, completed ? 1 : 0,
+        escapedRealmTag, ticketId);
+    transaction->Append(deliverySql.c_str());
+
+    CharacterDatabase.CommitTransaction(transaction);
+}
+
+// The whisper hook has to answer "does this player have an open ticket?" on the world thread for
+// every whisper sent on the realm. The poller already sees every in-game ticket, so it maintains
+// the answer here and the chat path never touches the database.
+//
+// PHASE 3: nothing reads Find() or NextWhisperSequence() yet - the whisper hook that does is
+// TicketPlayerScript, which arrives with the identity. The index is maintained now because the
+// poll is what fills it, and building it later would mean revisiting this file's hot path.
+class OpenTicketIndex
+{
+public:
+    static OpenTicketIndex* instance()
+    {
+        static OpenTicketIndex index;
+        return &index;
+    }
+
+    void Track(uint64 playerGuid, uint32 sourceTicketId, bool completed)
+    {
+        if (!playerGuid)
+            return;
+
+        if (completed)
+            _open.erase(playerGuid);
+        else
+            _open[playerGuid] = sourceTicketId;
+    }
+
+    // The core allows a player at most one open ticket, so this is unambiguous.
+    [[nodiscard]] uint32 Find(uint64 playerGuid) const
+    {
+        auto itr = _open.find(playerGuid);
+        return itr != _open.end() ? itr->second : 0;
+    }
+
+    void SetRealmTag(std::string tag) { _realmTag = std::move(tag); }
+    [[nodiscard]] std::string const& GetRealmTag() const { return _realmTag; }
+
+    [[nodiscard]] uint32 NextWhisperSequence() { return ++_whisperSequence; }
+
+private:
+    std::unordered_map<uint64, uint32> _open;
+    std::string _realmTag;
+    uint32 _whisperSequence = 0;
+};
+
+void PublishPlayerContext(std::string const& realmTag, uint32 sourceTicketId, uint64 playerGuidLow, bool forced)
+{
+    if (!playerGuidLow)
+        return;
+
+    ObjectGuid guid = ObjectGuid::Create<HighGuid::Player>(playerGuidLow);
+    CharacterCacheEntry const* cache = sCharacterCache->GetCharacterCacheByGuid(guid);
+    if (!cache)
+        return;
+
+    Player* online = ObjectAccessor::FindConnectedPlayer(guid);
+
+    uint32 level = online ? online->GetLevel() : cache->Level;
+    uint32 zoneId = online ? online->GetZoneId() : 0;
+    uint32 totalPlaytime = 0;
+    uint32 lastLogout = 0;
+
+    // Zone and playtime for an offline character only exist in the characters table.
+    if (QueryResult row = CharacterDatabase.PQuery(
+        "SELECT zone, totaltime, logout_time FROM characters WHERE guid = {}", playerGuidLow))
+    {
+        Field* fields = row->Fetch();
+        if (!online)
+            zoneId = fields[0].GetUInt16();
+        totalPlaytime = fields[1].GetUInt32();
+        lastLogout = fields[2].GetUInt32();
+    }
+
+    uint32 accountCreated = 0;
+    if (QueryResult row = LoginDatabase.PQuery(
+        "SELECT UNIX_TIMESTAMP(joindate) FROM account WHERE id = {}", cache->AccountId))
+    {
+        accountCreated = row->Fetch()[0].GetUInt32();
+    }
+
+    std::string escapedRealmTag = Escape(realmTag);
+    std::ostringstream rawKey;
+    rawKey << "ingame:" << realmTag << ':' << sourceTicketId << ":context";
+
+    uint32 capturedAt = uint32(GameTime::GetGameTime());
+
+    // Queued BEFORE the snapshot is overwritten, because the comparison is against what Discord
+    // was last shown. capturedAt is deliberately not part of it - it changes on every sweep, so
+    // comparing it would make every sweep a change - but it IS part of the delivery key, so each
+    // real change is its own row and a repeat within the same second collapses onto it.
+    std::ostringstream rawDeliveryKey;
+    rawDeliveryKey << "ingame:" << realmTag << ':' << sourceTicketId << ":context-updated:" << capturedAt;
+
+    // INSERT IGNORE, like the two other delivery inserts in this file, rather than an upsert: the
+    // SELECT joins two tables that both carry a ticket_id, so the no-op assignment an upsert needs
+    // is ambiguous and MySQL refuses the whole statement (ERROR 1052). Found by running it.
+    std::string const contextDelivery = Qf(
+        "INSERT IGNORE INTO heimdall_delivery "
+        "(ticket_id, delivery_key, direction, kind, payload_json) "
+        "SELECT t.id, SHA2('{}', 256), 'to_discord', 'context_updated', "
+        "JSON_OBJECT('realmTag', '{}', 'sourceTicketId', {}) "
+        "FROM heimdall_ticket t "
+        "LEFT JOIN heimdall_event e ON e.ticket_id = t.id AND e.event_type = 'player_context' "
+        "WHERE t.source = 'ingame' AND t.realm_tag = '{}' AND t.source_ticket_id = {} "
+        "AND ({} = 1 OR e.id IS NULL "
+        "OR JSON_EXTRACT(e.payload_json, '$.online') <> {} "
+        "OR JSON_EXTRACT(e.payload_json, '$.zoneId') <> {} "
+        "OR JSON_EXTRACT(e.payload_json, '$.level') <> {} "
+        "OR JSON_UNQUOTE(JSON_EXTRACT(e.payload_json, '$.name')) <> '{}')",
+        Escape(rawDeliveryKey.str()), escapedRealmTag, sourceTicketId, escapedRealmTag, sourceTicketId,
+        forced ? 1 : 0, online ? 1 : 0, zoneId, level, Escape(cache->Name));
+    CharacterDatabase.Execute(contextDelivery.c_str());
+
+    std::string const contextEvent = Qf(
+        "INSERT INTO heimdall_event "
+        "(ticket_id, event_key, event_type, actor_kind, actor_ref, payload_json) "
+        "SELECT id, SHA2('{}', 256), 'player_context', 'system', '{}', "
+        "JSON_OBJECT('name', '{}', 'level', {}, 'class', {}, 'race', {}, 'gender', {}, "
+        "'zoneId', {}, 'online', {}, 'accountId', {}, 'accountCreated', {}, "
+        "'totalPlaytime', {}, 'lastLogout', {}, 'capturedAt', {}) "
+        "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id = {} "
+        "ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json)",
+        Escape(rawKey.str()), Escape(cache->Name), Escape(cache->Name), level, uint32(cache->Class), uint32(cache->Race),
+        uint32(cache->Sex), zoneId, online ? 1 : 0, cache->AccountId, accountCreated, totalPlaytime, lastLogout,
+        capturedAt, escapedRealmTag, sourceTicketId);
+    CharacterDatabase.Execute(contextEvent.c_str());
+}
+
+class TicketPoller final : public WorldScript
+{
+public:
+    TicketPoller() : WorldScript(SCRIPT_NAME) { }
 
     void OnStartup() override
     {
-        if (!_enabled)
+        _settings = ReadSettings();
+        if (!_settings.enabled)
         {
-            // 2.0.0 shipped a guide that never told the operator to enable the module, and the
-            // startup line did not say it was off. This one says which setting is off and where.
             TC_LOG_INFO(HEIMDALL_LOG, "Heimdall {} for TrinityCore: the bridge is DISABLED. "
                 "Set Heimdall.Enabled = 1 in heimdall.conf to turn it on.", HEIMDALL_VERSION);
             return;
         }
 
-        TC_LOG_INFO(HEIMDALL_LOG, "Heimdall {} for TrinityCore: enabled, but this build is the "
-            "phase 1 skeleton - no tickets are polled, no commands are executed and nothing is "
-            "sent to Discord.", HEIMDALL_VERSION);
+        if (!IsValidRealmTag(_settings.realmTag))
+        {
+            // Refuse to run rather than write keys that could collide with another realm.
+            _settings.enabled = false;
+
+            if (_settings.realmPrefix.empty())
+                TC_LOG_ERROR(HEIMDALL_LOG, "Heimdall.RealmPrefix is blank and the fallback tag derived from RealmID {} "
+                    "(\"{}\") is longer than {} characters. Set an explicit RealmPrefix of 1-{} letters or digits. Bridge disabled.",
+                    realm.Id.Realm, _settings.realmTag, uint32(REALM_TAG_MAX_LENGTH), uint32(REALM_TAG_MAX_LENGTH));
+            else
+                TC_LOG_ERROR(HEIMDALL_LOG, "Heimdall.RealmPrefix \"{}\" is invalid: it must match ^[A-Za-z0-9]{{1,{}}}$. "
+                    "Bridge disabled so it cannot write ticket keys that collide with another realm.",
+                    _settings.realmPrefix, uint32(REALM_TAG_MAX_LENGTH));
+
+            return;
+        }
+
+        if (IsReservedRealmTag(_settings.realmTag))
+        {
+            _settings.enabled = false;
+
+            TC_LOG_ERROR(HEIMDALL_LOG, "Heimdall.RealmPrefix \"{}\" is reserved: \"{}\" is how the companion bot labels "
+                "Discord-created tickets, so in-game keys must not use it. Choose a different prefix. Bridge disabled.",
+                _settings.realmPrefix, RESERVED_REALM_TAG);
+
+            return;
+        }
+
+        // The value goes into SQL as a quoted identifier, so it is checked against MySQL's bare
+        // identifier alphabet before anything is built from it. It must also differ from the
+        // characters database: the point of the separate schema is that the bot's grants can stop
+        // at its edge, and a module told to put its tables back in the realm's database would
+        // silently undo that boundary.
+        if (!Sql::IsValidDatabaseName(_settings.database))
+        {
+            _settings.enabled = false;
+
+            TC_LOG_ERROR(HEIMDALL_LOG, "Heimdall.Database \"{}\" is not a valid database name: it must be 1-64 characters "
+                "of letters, digits, _ or $. Bridge disabled.", _settings.database);
+
+            return;
+        }
+
+        if (MySQLConnectionInfo const* info = CharacterDatabase.GetConnectionInfo(); info && info->database == _settings.database)
+        {
+            _settings.enabled = false;
+
+            TC_LOG_ERROR(HEIMDALL_LOG, "Heimdall.Database \"{}\" is the realm's characters database. Heimdall's tables "
+                "belong in a database of their own so the companion bot can be granted access to nothing else. "
+                "Bridge disabled.", _settings.database);
+
+            return;
+        }
+
+        if (!EnsureSchema())
+        {
+            _settings.enabled = false;
+            return;
+        }
+
+        OpenTicketIndex::instance()->SetRealmTag(_settings.realmTag);
+        // PHASE 3: ConfigureCommandAudit() goes here on the AzerothCore side. This core has no
+        // faithful pre-command hook, so there is no audit to configure (heimdall_shared.h).
+        bool const firstRun = !LoadWatermark();
+        if (firstRun)
+            SeedFirstRun();
+        else
+            LoadImportFloor();
+
+        SeedSeenTickets();
+        // PHASE 3: IdentityRegistry::Configure(Heimdall.GmIdentities) goes here.
+        PublishCommandChannel();
+
+        if (firstRun)
+        {
+            TC_LOG_INFO(HEIMDALL_LOG, "Heimdall {} enabled for realm tag \"{}\"; gm_ticket polling is read-only. "
+                "First run: seeded a new watermark with import mode \"{}\".",
+                HEIMDALL_VERSION, _settings.realmTag, _settings.firstRunImport);
+        }
+        else
+        {
+            TC_LOG_INFO(HEIMDALL_LOG, "Heimdall {} enabled for realm tag \"{}\"; gm_ticket polling is read-only. "
+                "Resuming at watermark {} with {} known ticket(s).",
+                HEIMDALL_VERSION, _settings.realmTag, _watermark, uint32(_seen.size()));
+        }
+
+        // A rebuild regenerates heimdall.conf from the .dist and silently returns every option to
+        // its shipped default, so anything the operator switched on deliberately switches itself
+        // off. Stating the resolved set here makes a reverted config something an operator can see
+        // in the log rather than something they discover when the evidence is missing.
+        TC_LOG_INFO(HEIMDALL_LOG, "Resolved configuration: ticket poll {}s, delivery poll {}s, archive retention "
+            "{} day(s), command audit unavailable on this core. These are the values in effect; if one is not what "
+            "you set, check that a rebuild has not restored heimdall.conf from the .dist. This build is the phase 2 "
+            "port: tickets and commands are bridged, whispers and GM identities are not.",
+            _settings.ticketPollSeconds, _settings.deliveryPollSeconds, _settings.archiveRetentionDays);
+
+        WarnAboutForeignRealmTags();
     }
+
+    // The realm tag keys everything - the watermark, the identity state, every ticket - so
+    // changing Heimdall.RealmPrefix on a live install makes the next start a "first run" under
+    // the new tag: open tickets get re-imported with duplicate Discord channels, and their old
+    // records are orphaned where the poller never reads them again.
+    //
+    // Deliberately a warning rather than a refusal, even for stranded OPEN tickets. Refusing
+    // would turn stranded history into a bridge outage - no tickets at all reach Discord until
+    // someone does database surgery - which punishes players for an operator's config change.
+    void WarnAboutForeignRealmTags()
+    {
+        std::string const sql = Qf(
+            "SELECT realm_tag, SUM(status IN ('open', 'claimed', 'closing')), COUNT(*) "
+            "FROM heimdall_ticket WHERE source = 'ingame' AND realm_tag <> '{}' GROUP BY realm_tag",
+            Escape(_settings.realmTag));
+        QueryResult rows = CharacterDatabase.Query(sql.c_str());
+        if (!rows)
+            return;
+
+        do
+        {
+            Field* fields = rows->Fetch();
+            std::string tag = fields[0].GetString();
+            uint64 openCount = fields[1].GetUInt64();
+            uint64 total = fields[2].GetUInt64();
+
+            // The leading newline is not decoration: on the console appender these arrive welded to
+            // the end of whatever the core printed last, which buries the loudest warning the
+            // module has.
+            if (openCount)
+            {
+                TC_LOG_ERROR(HEIMDALL_LOG, "\n{} OPEN ticket(s) exist under realm tag \"{}\", but this install is "
+                    "configured as \"{}\". They are STRANDED: only \"{}\" is polled, so they will never "
+                    "update or close from the game again. If the prefix change was unintentional, restore "
+                    "Heimdall.RealmPrefix and restart; if it was deliberate, close the stranded tickets from "
+                    "Discord. RealmPrefix is chosen once at install and must not change afterwards.",
+                    openCount, tag, _settings.realmTag, _settings.realmTag);
+            }
+            else
+            {
+                TC_LOG_WARN(HEIMDALL_LOG, "\n{} closed ticket(s) exist under realm tag \"{}\" (this install is "
+                    "configured as \"{}\"). History only - nothing is stranded - but it means the realm "
+                    "tag changed at some point, which is not supported.",
+                    total, tag, _settings.realmTag);
+            }
+        } while (rows->NextRow());
+    }
+
+    void OnShutdownInitiate(ShutdownExitCode /*code*/, ShutdownMask /*mask*/) override
+    {
+        // PHASE 3: FlushCommandAudit() and IdentityRegistry::LogoutAll() go here. Nothing this
+        // phase owns survives a restart in memory, so there is nothing to flush yet.
+    }
+
+    void OnUpdate(uint32 diff) override
+    {
+        if (!_settings.enabled)
+            return;
+
+        // PHASE 3: IdentityRegistry::Update() and PollDeliveries(diff) - the whisper half of the
+        // queue - go here, ahead of the command poll, exactly as they do on AzerothCore.
+        PollGameCommands(diff);
+        SweepPlayerContext(diff);
+
+        _ticketElapsed += diff;
+        if (_ticketElapsed < _settings.ticketPollSeconds * IN_MILLISECONDS)
+            return;
+        _ticketElapsed = 0;
+
+        // Three ways a row can be worth reading.
+        //
+        // 1. At or after the watermark: new tickets, and tickets whose text changed.
+        // 2. Still open in gm_ticket: re-read every pass, because neither SetClosedBy nor
+        //    SetCompleted touches lastModifiedTime, so a closure never moves a row past the
+        //    watermark on its own. Load-bearing; do not simplify it.
+        // 3. Still open as far as the BRIDGE is concerned. This closes a gap that clauses 1 and 2
+        //    cannot: the moment a ticket is closed in game it stops satisfying clause 2, and its
+        //    lastModifiedTime never moved, so unless it happens to be the most recently modified
+        //    ticket on the realm it also fails clause 1. The closure is then never observed at all -
+        //    silently, and permanently, because nothing ever revisits that row.
+        //
+        //    Reconciling against heimdall_ticket rather than an in-memory set is deliberate: it is
+        //    the bridge's own record of what it believes is unfinished, it survives a restart, and
+        //    it is the same table SeedSeenTickets already reads.
+        //
+        // All three clauses hold on this core for the same reasons: TicketMgr's setters are
+        // orthogonal (close sets type, complete sets completed) and only SetMessage moves
+        // lastModifiedTime - TicketMgr.cpp:217-235 and 381-403.
+        std::string const pollSql = Qf(
+            "SELECT Id, playerGuid, name, description, lastModifiedTime, completed, type "
+            "FROM gm_ticket WHERE type IN (0, 1, 2) AND (lastModifiedTime >= {} OR (completed = 0 AND type = 0) "
+            "  OR Id IN (SELECT source_ticket_id FROM heimdall_ticket "
+            "            WHERE source = 'ingame' AND realm_tag = '{}' AND source_ticket_id IS NOT NULL "
+            "              AND status IN ('open', 'claimed', 'closing'))) "
+            "ORDER BY Id",
+            _watermark, Escape(_settings.realmTag));
+        QueryResult rows = CharacterDatabase.Query(pollSql.c_str());
+        if (!rows)
+            return;
+
+        uint32 previousWatermark = _watermark;
+        uint32 examined = 0;
+        uint32 written = 0;
+
+        do
+        {
+            Field* fields = rows->Fetch();
+            uint32 ticketId = fields[0].GetUInt32();
+            uint32 modifiedTime = fields[4].GetUInt32();
+            ++examined;
+
+            // Only ever non-zero when this realm started with FirstRunImport = none. Applied here
+            // rather than in the query so the poll filter itself stays exactly as it was.
+            if (ticketId <= _importFloor)
+                continue;
+
+            // Both columns have to be consulted. The core carries two independent closure signals,
+            // and each GM command writes only one of them:
+            //   .ticket close    -> CloseTicket -> SetClosedBy -> `type` = TICKET_TYPE_CLOSED
+            //   .ticket complete -> SetCompleted -> `completed` = 1, leaving `type` open
+            // A player abandoning a ticket, and character deletion, also go through SetClosedBy.
+            bool completed = fields[5].GetUInt8() != 0 || fields[6].GetUInt8() != 0;
+
+            _watermark = std::max(_watermark, modifiedTime);
+
+            // Suppress the write when nothing observable moved since the last poll. An idle server
+            // re-reads the open tickets every interval and writes nothing.
+            uint64 playerGuid = fields[1].GetUInt64();
+            TrackOpenTicket(playerGuid, ticketId, completed);
+
+            auto [itr, inserted] = _seen.try_emplace(ticketId, TicketState{ modifiedTime, completed });
+            if (!inserted)
+            {
+                if (itr->second.ModifiedTime == modifiedTime && itr->second.Completed == completed)
+                    continue;
+
+                itr->second = TicketState{ modifiedTime, completed };
+            }
+
+            std::string const playerName = fields[2].GetString();
+            TC_LOG_DEBUG(HEIMDALL_LOG, "Poll recorded ticket {} for \"{}\" (modified {}, closed {}).",
+                ticketId, playerName, modifiedTime, completed ? 1 : 0);
+
+            RecordIngameTicket(_settings.realmTag, ticketId, playerGuid, playerName,
+                fields[3].GetString(), modifiedTime, completed, _settings.archiveRetentionDays);
+            ++written;
+        } while (rows->NextRow());
+
+        TC_LOG_DEBUG(HEIMDALL_LOG, "Poll finished: {} row(s) examined, {} written, watermark {}.",
+            examined, written, _watermark);
+
+        if (_watermark != previousWatermark)
+            SaveWatermark();
+    }
+
+private:
+    struct TicketState
+    {
+        uint32 ModifiedTime = 0;
+        bool Completed = false;
+    };
+
+    [[nodiscard]] std::string WatermarkKey() const
+    {
+        return "ingame.watermark." + _settings.realmTag;
+    }
+
+    // Returns false when this realm has never polled. The absence of the row is the signal, not an
+    // empty ticket table: an operator who deletes their tickets has not asked to re-import history.
+    bool LoadWatermark()
+    {
+        std::string const sql = Qf(
+            "SELECT setting_value FROM heimdall_setting WHERE setting_key = '{}'", Escape(WatermarkKey()));
+        QueryResult result = CharacterDatabase.Query(sql.c_str());
+        if (!result)
+            return false;
+
+        if (Optional<uint32> stored = Trinity::StringTo<uint32>((*result)[0].GetString()))
+            _watermark = *stored;
+
+        return true;
+    }
+
+    [[nodiscard]] std::string ImportFloorKey() const
+    {
+        return "ingame.import_floor." + _settings.realmTag;
+    }
+
+    void LoadImportFloor()
+    {
+        std::string const sql = Qf(
+            "SELECT setting_value FROM heimdall_setting WHERE setting_key = '{}'", Escape(ImportFloorKey()));
+        QueryResult result = CharacterDatabase.Query(sql.c_str());
+        if (!result)
+            return;
+
+        if (Optional<uint32> stored = Trinity::StringTo<uint32>((*result)[0].GetString()))
+            _importFloor = *stored;
+    }
+
+    void SaveImportFloor() const
+    {
+        std::string const sql = Qf(
+            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Escape(ImportFloorKey()), _importFloor);
+        CharacterDatabase.Execute(sql.c_str());
+    }
+
+    // The first poll on a realm decides what to do with the history already sitting in gm_ticket.
+    // Left to the ordinary filter it would import all of it, and the bot would open a Discord
+    // channel per ticket - thousands of them on an established realm, which is a rate-limit wall
+    // and hours of hand-deleting.
+    //
+    // "open" and "all" need no floor: with the watermark seeded to now, a closed ticket matches
+    // neither half of the poll filter. "none" does, because the filter's second clause matches
+    // every open ticket on every poll by design - that is what makes a closure visible - so
+    // without a floor those tickets would arrive on the next start instead.
+    void SeedFirstRun()
+    {
+        uint32 const now = static_cast<uint32>(GameTime::GetGameTime());
+
+        if (_settings.firstRunImport == "all")
+        {
+            _watermark = 0;
+            SaveWatermark();
+            TC_LOG_INFO(HEIMDALL_LOG, "First run for realm tag \"{}\": Heimdall.FirstRunImport is \"all\", so every "
+                "ticket in gm_ticket will be imported and given a Discord channel.", _settings.realmTag);
+            return;
+        }
+
+        _watermark = now;
+
+        if (_settings.firstRunImport == "none")
+        {
+            QueryResult highest = CharacterDatabase.Query("SELECT COALESCE(MAX(Id), 0) FROM gm_ticket");
+            _importFloor = highest ? (*highest)[0].GetUInt32() : 0;
+            SaveImportFloor();
+        }
+
+        SaveWatermark();
+
+        uint32 open = 0;
+        if (QueryResult counted = CharacterDatabase.PQuery(
+            "SELECT COUNT(*) FROM gm_ticket WHERE completed = 0 AND type = 0 AND Id > {}", _importFloor))
+        {
+            open = (*counted)[0].GetUInt32();
+        }
+
+        if (_settings.firstRunImport == "none")
+        {
+            TC_LOG_INFO(HEIMDALL_LOG, "First run for realm tag \"{}\": starting empty at watermark {}. Ticket ids up to "
+                "{} are ignored; anything filed after that is picked up normally.",
+                _settings.realmTag, _watermark, _importFloor);
+        }
+        else
+        {
+            TC_LOG_INFO(HEIMDALL_LOG, "First run for realm tag \"{}\": seeded watermark {} and importing {} open "
+                "ticket(s). Closed history stays in gm_ticket and gets no Discord channel.",
+                _settings.realmTag, _watermark, open);
+        }
+    }
+
+    void SaveWatermark() const
+    {
+        std::string const sql = Qf(
+            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Escape(WatermarkKey()), _watermark);
+        CharacterDatabase.Execute(sql.c_str());
+    }
+
+    // Rebuilds the poll state from what this realm already recorded, so a restart does not rewrite
+    // every live ticket just to discover nothing changed.
+    void SeedSeenTickets()
+    {
+        std::string const sql = Qf(
+            "SELECT source_ticket_id, source_modified_time, status, player_guid FROM heimdall_ticket "
+            "WHERE source = 'ingame' AND realm_tag = '{}'",
+            Escape(_settings.realmTag));
+        QueryResult result = CharacterDatabase.Query(sql.c_str());
+        if (!result)
+            return;
+
+        do
+        {
+            Field* fields = result->Fetch();
+            std::string status = fields[2].GetString();
+            bool completed = status == "closed" || status == "cancelled";
+            uint32 ticketId = fields[0].GetUInt32();
+
+            _seen[ticketId] = TicketState{ fields[1].GetUInt32(), completed };
+            TrackOpenTicket(fields[3].GetUInt64(), ticketId, completed);
+        } while (result->NextRow());
+    }
+
+    void TrackOpenTicket(uint64 playerGuid, uint32 ticketId, bool completed)
+    {
+        OpenTicketIndex::instance()->Track(playerGuid, ticketId, completed);
+    }
+
+    // Leases this realm's queued command rows, composes each from the fixed switch, runs it through
+    // the core's own handlers and records what the realm said.
+    void PollGameCommands(uint32 diff)
+    {
+        _gameCommandElapsed += diff;
+        if (_gameCommandElapsed < _settings.deliveryPollSeconds * IN_MILLISECONDS)
+            return;
+        _gameCommandElapsed = 0;
+
+        std::string escapedRealmTag = Escape(_settings.realmTag);
+
+        // Recover rows a previous run of this worldserver left stranded in 'leased'.
+        std::string const recoverSql = Qf(
+            "UPDATE heimdall_delivery SET state = 'queued', lease_owner = NULL, leased_until = NULL "
+            "WHERE direction = 'soap' AND state = 'leased' AND leased_until < CURRENT_TIMESTAMP "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.realmTag')) = '{}'",
+            escapedRealmTag);
+        CharacterDatabase.Execute(recoverSql.c_str());
+
+        // The JOIN is the gate, not a convenience. Without it a hand-written row needs no real
+        // ticket, not even one belonging to this realm, and the target comes out of its own JSON.
+        // A row that does not resolve to a ticket of THIS realm returns nothing here, and the
+        // sweep below dead-letters it so it cannot sit queued forever unexplained.
+        //
+        // The payload's realmTag check is kept as well, deliberately. It is redundant against
+        // t.realm_tag, and that is the point: the lease-recovery statement above has no ticket to
+        // join, so keeping both means the two statements agree about which rows are this realm's.
+        std::string const leaseSql = Qf(
+            "SELECT d.id, d.kind, d.attempts, d.ticket_id, "
+            "t.source_ticket_id, t.public_key, t.player_name, t.player_guid, "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.action')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.gmName')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.destination')), "
+            "JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.causedBy')) "
+            "FROM heimdall_delivery d "
+            "JOIN heimdall_ticket t ON t.id = d.ticket_id "
+            "WHERE d.direction = 'soap' AND d.state = 'queued' AND d.available_at <= CURRENT_TIMESTAMP "
+            "AND t.realm_tag = '{}' "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.realmTag')) = '{}' "
+            "ORDER BY d.id LIMIT 20",
+            escapedRealmTag, escapedRealmTag);
+        QueryResult rows = CharacterDatabase.Query(leaseSql.c_str());
+
+        RefuseUnattachedCommands(escapedRealmTag);
+
+        if (!rows)
+            return;
+
+        do
+        {
+            Field* fields = rows->Fetch();
+            uint64 deliveryId = fields[0].GetUInt64();
+            std::string kind = fields[1].GetString();
+            // The lease below adds one. Everything downstream uses that post-lease number, because
+            // reading it back would race the lease: CharacterDatabase.Execute is asynchronous, so a
+            // Query issued straight after it can still see the row as it was.
+            uint32 attemptsAfter = fields[2].GetUInt32() + 1;
+            uint64 ticketId = fields[3].GetUInt64();
+
+            // WHO, and WHICH TICKET, from the module's own row. Never from the payload.
+            Heimdall::Command::TicketTarget target;
+            target.sourceTicketId = fields[4].GetUInt32();
+            target.publicKey = fields[5].GetString();
+            target.playerName = fields[6].GetString();
+            target.playerGuid = fields[7].GetUInt64();
+
+            // WHAT to do, from the payload. gmName is here rather than in the ticket because it is
+            // gated by consent elsewhere: on AzerothCore the identity registry only acts for
+            // characters the operator listed in Heimdall.GmIdentities. PHASE 3 brings that list to
+            // this core; until then the only command that carries a gmName is .ticket assign, whose
+            // own handler refuses any name without RBAC_PERM_COMMANDS_BE_ASSIGNED_TICKET.
+            std::string action = fields[8].GetString();
+            std::string gmName = fields[9].GetString();
+            std::string destination = fields[10].GetString();
+            std::string causedBy = fields[11].GetString();
+
+            // Lease before performing, so a crash mid-command leaves a recoverable row rather than
+            // a command whose fate nobody knows.
+            std::string const claimSql = Qf(
+                "UPDATE heimdall_delivery SET state = 'leased', attempts = attempts + 1, "
+                "lease_owner = '{}', leased_until = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL {} SECOND) "
+                "WHERE id = {} AND state = 'queued'",
+                Escape(LeaseOwner()), DELIVERY_LEASE_SECONDS, deliveryId);
+            CharacterDatabase.Execute(claimSql.c_str());
+
+            std::string command;
+            std::string refusal;
+            if (!Heimdall::Command::Compose(kind, action, target, gmName, destination, command, refusal))
+            {
+                FailGameCommand(deliveryId, kind, ticketId, attemptsAfter, refusal);
+                continue;
+            }
+
+            std::string output;
+            bool succeeded = RunRealmCommand(command, output);
+
+            // A handler that returns true having done nothing is the trap the bot learned the hard
+            // way: ".ticket close" on an unknown id answers "Ticket not found." and reports
+            // success. The reply text is screened for the markers below.
+            if (succeeded && LooksLikeRefusal(output))
+                succeeded = false;
+
+            if (!succeeded)
+            {
+                FailGameCommand(deliveryId, kind, ticketId, attemptsAfter,
+                    output.empty() ? ("The realm refused \"" + command + "\".") : output);
+                continue;
+            }
+
+            std::string const doneSql = Qf(
+                "UPDATE heimdall_delivery SET state = 'delivered', delivered_at = CURRENT_TIMESTAMP, "
+                "leased_until = NULL, last_error = NULL WHERE id = {}",
+                deliveryId);
+            CharacterDatabase.Execute(doneSql.c_str());
+
+            AttributeGameCommand(command, causedBy);
+            TC_LOG_INFO(HEIMDALL_LOG, "Ran \"{}\" for delivery {}.", command, deliveryId);
+        } while (rows->NextRow());
+    }
+
+    // Command composition and its validators live in mod_heimdall_command.h - the AzerothCore
+    // module's own header, compiled here unchanged (bot/test/schema-drift.test.js asserts the two
+    // copies are byte-identical). That header holds the rule this path follows: the payload says
+    // WHAT to do, the module's own ticket row says WHO it is done to.
+
+    // A queued command row claiming this realm that has no ticket of this realm behind it. Without
+    // this it would simply never be selected - queued forever, never run, never failed, never
+    // explained, which is a worse way to be secure. It is marked dead with a reason a human can
+    // act on.
+    //
+    // Deliberately matched on the payload's realmTag: a row with no ticket has nothing else to say
+    // whose realm it belongs to, and a row pointing at another realm's ticket is that realm's
+    // business to refuse, not ours to reach across and mark.
+    void RefuseUnattachedCommands(std::string const& escapedRealmTag)
+    {
+        std::string const sql = Qf(
+            "UPDATE heimdall_delivery d "
+            "LEFT JOIN heimdall_ticket t ON t.id = d.ticket_id AND t.realm_tag = '{}' "
+            "SET d.state = 'dead', d.attempts = d.attempts + 1, "
+            "d.last_error = 'Refused: this command row has no ticket on this realm behind it. "
+            "Heimdall takes the target of every command from its own ticket row, so a row without "
+            "one cannot be performed.' "
+            "WHERE d.direction = 'soap' AND d.state = 'queued' "
+            "AND d.available_at <= CURRENT_TIMESTAMP "
+            "AND JSON_UNQUOTE(JSON_EXTRACT(d.payload_json, '$.realmTag')) = '{}' "
+            "AND t.id IS NULL",
+            escapedRealmTag, escapedRealmTag);
+        CharacterDatabase.Execute(sql.c_str());
+    }
+
+    // The markers the bot screened SOAP replies with. Identical to the AzerothCore module's set,
+    // but checked against THIS core rather than assumed: every id below was read from
+    // src/server/game/Miscellaneous/Language.h and every string from the trinity_string rows the
+    // installed world database holds for it.
+    //
+    //   "not found"              2005 LANG_COMMAND_TICKETNOTEXIST     "Ticket not found."
+    //   "does not exist"         6    LANG_CMD_INVALID                "Command '%.*s' does not exist"
+    //   "incorrect syntax"       10   LANG_CMD_SYNTAX                 "Incorrect syntax."
+    //   "invalid name specified" 2012 LANG_COMMAND_TICKETASSIGNERROR_A "Invalid name specified. ..."
+    //   "already assigned"       2007 LANG_COMMAND_TICKETALREADYASSIGNED "Ticket %d is already assigned."
+    //                            2013 LANG_COMMAND_TICKETASSIGNERROR_B  "This ticket is already assigned to yourself. ..."
+    //   "syntax:"                the usage line the command tables print
+    //   "no such"                generic coverage; not a ticket phrase on this core
+    //   "cannot be assigned"     not a phrase on this core either; kept as defensive coverage
+    //
+    // Two of this core's ticket refusals match no marker: 2016 "Cannot close ticket %d, it is
+    // assigned to another GM." and 2015 "You cannot unassign tickets from staff members with a
+    // higher security level than yourself." Both are also unmatched by the AzerothCore module's
+    // identical set, and neither is reachable from here: each is guarded by
+    // handler->GetSession() being non-null (TC cs_ticket.cpp:120-126, AC cs_ticket.cpp:132-137),
+    // and a CliHandler has no session, so the console path Heimdall uses never reaches them.
+    // Left alone deliberately - the marker set is the same on both cores, and closing a latent gap
+    // on one of them only is how two products start to drift. It is written up in the phase 2
+    // report as a change for both halves.
+    static bool LooksLikeRefusal(std::string const& output)
+    {
+        std::string lowered = output;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        for (char const* marker : { "not found", "does not exist", "invalid name specified",
+            "cannot be assigned", "already assigned", "no such", "syntax:", "incorrect syntax" })
+        {
+            if (lowered.find(marker) != std::string::npos)
+                return true;
+        }
+        return false;
+    }
+
+    // Fails a job the way the bot fails one: the same attempt count, the same backoff, the same
+    // rule for when it is dead. Then it queues the announcement, because the ticket channel is the
+    // bot's to write in.
+    //
+    // Every value here is computed rather than read back. CharacterDatabase.Execute is asynchronous:
+    // a Query issued after it can still see the row as it was.
+    void FailGameCommand(uint64 deliveryId, std::string const& kind, uint64 ticketId, uint32 attempts,
+        std::string const& reason)
+    {
+        bool dead = attempts >= _settings.deliveryMaxAttempts;
+
+        std::string const failSql = Qf(
+            "UPDATE heimdall_delivery SET state = '{}', "
+            "available_at = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL LEAST(900, POW(2, {}) * 5) SECOND), "
+            "leased_until = NULL, last_error = LEFT('{}', 512) WHERE id = {}",
+            dead ? "dead" : "queued", attempts, Escape(reason), deliveryId);
+        CharacterDatabase.Execute(failSql.c_str());
+
+        TC_LOG_WARN(HEIMDALL_LOG, "Delivery {} ({}) failed on attempt {}{}: {}", deliveryId, kind, attempts,
+            dead ? " and was given up on" : "", reason);
+
+        std::ostringstream rawKey;
+        rawKey << "trouble:" << _settings.realmTag << ':' << deliveryId << ':' << attempts;
+
+        std::string const troubleSql = Qf(
+            "INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
+            "VALUES ({}, SHA2('{}', 256), 'to_discord', 'delivery_trouble', "
+            "JSON_OBJECT('realmTag', '{}', 'ofKind', '{}', 'state', '{}', 'attempts', {}, 'error', '{}'))",
+            ticketId ? std::to_string(ticketId) : std::string("NULL"), Escape(rawKey.str()),
+            Escape(_settings.realmTag), Escape(kind), dead ? "dead" : "queued", attempts, Escape(reason));
+        CharacterDatabase.Execute(troubleSql.c_str());
+    }
+
+    // The realm logs every command this module runs as "Console" - a CliHandler has no session to
+    // attribute. This posts the half the realm cannot know: which Discord user asked for it.
+    //
+    // Structurally unreachable on this core: commandAuditEnabled has no configuration key here
+    // (heimdall_shared.h says why). Ported and kept whole so that the day this core grows a
+    // faithful pre-command hook, enabling it is a config key rather than a rewrite.
+    void AttributeGameCommand(std::string const& command, std::string const& causedBy)
+    {
+        if (!_settings.commandAuditEnabled)
+            return;
+
+        std::ostringstream rawKey;
+        rawKey << "attrib:" << _settings.realmTag << ':' << GameTime::GetGameTime() << ':' << command << ':' << causedBy;
+
+        std::string const sql = Qf(
+            "INSERT IGNORE INTO heimdall_delivery (ticket_id, delivery_key, direction, kind, payload_json) "
+            "VALUES (NULL, SHA2('{}', 256), 'to_discord', 'command_attribution', "
+            "JSON_OBJECT('realmTag', '{}', 'command', '{}', 'causedBy', {}))",
+            Escape(rawKey.str()), Escape(_settings.realmTag), Escape(command),
+            causedBy.empty() ? std::string("NULL") : ("'" + Escape(causedBy) + "'"));
+        CharacterDatabase.Execute(sql.c_str());
+    }
+
+    // Tells the bot that this realm's commands are performed by the module, so it does not need a
+    // SOAP account. The bot reads this at startup: absent means an older worldserver that cannot
+    // lease intent rows.
+    void PublishCommandChannel() const
+    {
+        std::string const sql = Qf(
+            "INSERT INTO heimdall_setting (setting_key, setting_value) VALUES ('{}', '{}') "
+            "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)",
+            Escape("runtime.command_channel." + _settings.realmTag), Escape(std::string(HEIMDALL_VERSION)));
+        CharacterDatabase.Execute(sql.c_str());
+    }
+
+    [[nodiscard]] std::string LeaseOwner() const
+    {
+        return "worldserver:" + _settings.realmTag;
+    }
+
+    // Keeps context reasonably fresh even if nobody presses Refresh. The online indicator is what
+    // needs to be current, and that has the refresh button.
+    void SweepPlayerContext(uint32 diff)
+    {
+        _contextElapsed += diff;
+        if (_contextElapsed < _settings.contextRefreshSeconds * IN_MILLISECONDS)
+            return;
+        _contextElapsed = 0;
+
+        std::string const sql = Qf(
+            "SELECT source_ticket_id, player_guid FROM heimdall_ticket "
+            "WHERE source = 'ingame' AND realm_tag = '{}' AND status IN ('open', 'claimed', 'closing') "
+            "AND player_guid IS NOT NULL LIMIT 50",
+            Escape(_settings.realmTag));
+        QueryResult rows = CharacterDatabase.Query(sql.c_str());
+        if (!rows)
+            return;
+
+        do
+        {
+            Field* fields = rows->Fetch();
+            PublishPlayerContext(_settings.realmTag, fields[0].GetUInt32(), fields[1].GetUInt64(), false);
+        } while (rows->NextRow());
+    }
+
+    Settings& _settings = CurrentSettings();
+    uint32 _ticketElapsed = 0;
+    uint32 _gameCommandElapsed = 0;
+    uint32 _contextElapsed = 0;
+    uint32 _watermark = 0;
+    std::unordered_map<uint32, TicketState> _seen;
+    uint32 _importFloor = 0;
 };
+}
 
 // Called from AddCustomScripts() in src/server/scripts/Custom/custom_script_loader.cpp - the one
-// file in their own core an adopter edits. See trinitycore/README.md, step 3.
+// file in their own core an adopter edits. See trinitycore/README.md, step 4.
+//
+// PHASE 3 registers TicketPlayerScript (whisper capture) and the .heimdall console commands here
+// too; on AzerothCore that is Addmod_heimdall().
 void AddSC_heimdall()
 {
-    new heimdall_world();
+    new TicketPoller();
 }

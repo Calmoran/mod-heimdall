@@ -15,15 +15,76 @@
 #     and the parser then reports "'=' character not found in line (...heimdall.conf:1)" and the
 #     realm does not start.
 #
-# THIS IS THE PHASE 1 SKELETON. It reads Heimdall.Enabled and writes one line at startup. No
-# tickets are polled, no commands are executed and nothing is sent to Discord yet.
+# THIS IS THE PHASE 2 PORT. Tickets are polled and Discord's commands are executed. GM identities
+# and whispers are not here yet: a reply typed in Discord has nothing to speak through until phase
+# 3, and the settings that configure it are absent rather than present and ignored.
 ###################################################################################################
 
 [worldserver]
 
 # Enable the game-side bridge. Default 0.
-# In this build the setting only changes which line is logged at startup.
 Heimdall.Enabled = 0
+
+# The database that holds Heimdall's tables, on the same MySQL server as the realm. The module
+# creates the tables there itself on first start; the database and the core's right to use it are
+# the one piece of manual SQL (deploy/create-heimdall-database.sql at the repository root, with
+# the core's own MySQL account in place of the AzerothCore one it names). The companion bot's
+# account is granted this database and nothing else, which is why it must not be a realm database:
+# a value equal to the characters database is refused at startup and the bridge stays disabled.
+# Letters, digits, _ and $ only, up to 64 characters. Must match MYSQL_DATABASE in the bot's .env.
+Heimdall.Database = "heimdall"
+
+# Short tag identifying this realm in ticket keys, 1-16 letters or digits (for example "ARCA",
+# giving keys like ARCA-42). Leave blank to derive it from this worldserver's RealmID instead,
+# giving keys like R1-42. "DIS" is reserved, because that is how the companion bot labels tickets
+# opened from Discord.
+#
+#        CHOOSE THIS ONCE, AT INSTALL. The tag keys everything - the watermark and every ticket -
+#        so changing it later makes the next start a first run under the new tag: open tickets are
+#        re-imported with duplicate Discord channels, and their old records are orphaned where the
+#        poller never reads them. The worldserver warns at startup when tickets exist under a tag
+#        other than the configured one.
+#
+#        THE TAG MUST BE UNIQUE PER DISCORD GUILD, not merely per database.
+Heimdall.RealmPrefix = ""
+
+# What the very first poll on this realm does with the tickets already in gm_ticket:
+#   open   import the open ones, leave closed history alone (default)
+#   none   import nothing; only tickets filed after this start are bridged
+#   all    import everything, including closed history - one Discord channel per ticket
+# Only ever consulted when this realm has no watermark yet.
+Heimdall.FirstRunImport = "open"
+
+# How often gm_ticket is read, in seconds. Read-only: the module never writes that table.
+Heimdall.TicketPollSeconds = 15
+
+# How often queued commands from Discord are picked up, in seconds. This is the whole of the delay
+# between a staff member pressing a button and the effect in game, so 1 is the default.
+Heimdall.DeliveryPollSeconds = 1
+
+# How many times a command is retried before it is given up on and reported to Discord. Mirrors
+# the bot's own limit; both halves fail a job by the same rule.
+Heimdall.DeliveryMaxAttempts = 12
+
+# How long a closed ticket's transcript is kept, in days.
+Heimdall.ArchiveRetentionDays = 180
+
+# How often the player card behind an open ticket is refreshed, in seconds. Minimum 10.
+Heimdall.ContextRefreshSeconds = 15
+
+# NOT AVAILABLE IN THIS RELEASE, and absent rather than present-and-ignored:
+#
+#   Heimdall.GmIdentities, Heimdall.MaxWhisperBytes, Heimdall.GmChatTag
+#       The GM identity and whisper bridging arrive in the next release. Until then a ticket's chat
+#       is one-way: what a player writes in game is not bridged, and a Discord reply has no
+#       identity to speak through.
+#
+#   Heimdall.CommandAudit*
+#       The AzerothCore module can log every GM command with the Discord user who caused it. Doing
+#       that faithfully needs a pre-command hook covering game, console and SOAP alike, which this
+#       core does not offer without a third core patch. A switch that produced partial attribution
+#       would be worse than none, so there is no switch: on TrinityCore the audit is off, and the
+#       release notes say so rather than a config comment implying it can be turned on.
 
 # Heimdall's log category. TrinityCore's stock "root" logger is at level 5 (error), and an
 # unconfigured category inherits from it - without this line Heimdall's startup message is
