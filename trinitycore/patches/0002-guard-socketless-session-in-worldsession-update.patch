@@ -1,0 +1,18 @@
+diff --git a/src/server/game/Server/WorldSession.cpp b/src/server/game/Server/WorldSession.cpp
+index 96054adfdd..e080b94e94 100644
+--- a/src/server/game/Server/WorldSession.cpp
++++ b/src/server/game/Server/WorldSession.cpp
+@@ -292,7 +292,12 @@ bool WorldSession::Update(uint32 diff, PacketFilter& updater)
+     ///- Before we process anything:
+     /// If necessary, kick the player because the client didn't send anything for too long
+     /// (or they've been idling in character select)
+-    if (IsConnectionIdle() && !HasPermission(rbac::RBAC_PERM_IGNORE_IDLE_CONNECTION))
++    // Guard added for Heimdall's headless GM identity, which is a session with no client and so
++    // no socket - a configuration this core does not otherwise create, rather than a case it
++    // handles wrongly. Map::Update updates the session of every in-world player, so such a
++    // session reaches this line; m_timeOutTime starts at 0, making IsConnectionIdle() true from
++    // the first tick, and the dereference is then certain.
++    if (m_Socket && IsConnectionIdle() && !HasPermission(rbac::RBAC_PERM_IGNORE_IDLE_CONNECTION))
+         m_Socket->CloseSocket();
+ 
+     ///- Retrieve packets from the receive queue and call the appropriate handlers

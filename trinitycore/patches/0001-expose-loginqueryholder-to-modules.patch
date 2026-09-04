@@ -1,0 +1,64 @@
+diff --git a/src/server/game/Handlers/CharacterHandler.cpp b/src/server/game/Handlers/CharacterHandler.cpp
+index 783ecbfcc5..a9c6b10e4e 100644
+--- a/src/server/game/Handlers/CharacterHandler.cpp
++++ b/src/server/game/Handlers/CharacterHandler.cpp
+@@ -55,19 +55,6 @@
+ #include "QueryHolder.h"
+ #include "World.h"
+ 
+-class LoginQueryHolder : public CharacterDatabaseQueryHolder
+-{
+-    private:
+-        uint32 m_accountId;
+-        ObjectGuid m_guid;
+-    public:
+-        LoginQueryHolder(uint32 accountId, ObjectGuid guid)
+-            : m_accountId(accountId), m_guid(guid) { }
+-        ObjectGuid GetGuid() const { return m_guid; }
+-        uint32 GetAccountId() const { return m_accountId; }
+-        bool Initialize();
+-};
+-
+ bool LoginQueryHolder::Initialize()
+ {
+     SetSize(MAX_PLAYER_LOGIN_QUERY);
+diff --git a/src/server/game/Server/WorldSession.h b/src/server/game/Server/WorldSession.h
+index 38f4539f44..c5f59beefe 100644
+--- a/src/server/game/Server/WorldSession.h
++++ b/src/server/game/Server/WorldSession.h
+@@ -30,6 +30,7 @@
+ #include "LockedQueue.h"
+ #include "ObjectGuid.h"
+ #include "Packet.h"
++#include "QueryHolder.h"
+ #include "SharedDefines.h"
+ #include <boost/circular_buffer_fwd.hpp>
+ #include <string>
+@@ -42,7 +43,6 @@ class GameClient;
+ class GameObject;
+ class InstanceSave;
+ class Item;
+-class LoginQueryHolder;
+ class Object;
+ class Player;
+ class Quest;
+@@ -62,6 +62,19 @@ enum AuctionCommand : uint8;
+ enum AuctionResult : uint8;
+ enum InventoryResult : uint8;
+ 
++class LoginQueryHolder : public CharacterDatabaseQueryHolder
++{
++    private:
++        uint32 m_accountId;
++        ObjectGuid m_guid;
++    public:
++        LoginQueryHolder(uint32 accountId, ObjectGuid guid)
++            : m_accountId(accountId), m_guid(guid) { }
++        ObjectGuid GetGuid() const { return m_guid; }
++        uint32 GetAccountId() const { return m_accountId; }
++        bool Initialize();
++};
++
+ namespace lfg
+ {
+     struct LfgJoinResultData;

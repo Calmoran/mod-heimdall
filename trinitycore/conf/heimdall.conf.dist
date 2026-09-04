@@ -1,0 +1,32 @@
+###################################################################################################
+# Heimdall for TrinityCore
+#
+# Copy this file to worldserver.conf.d/heimdall.conf next to your worldserver.conf, then edit the
+# copy. Worldserver reads every .conf file in that directory at startup, so nothing in
+# worldserver.conf itself has to be changed.
+#
+# Two things worth knowing about how this core reads additional config files:
+#   - Keep the single [worldserver] section header below. Only the FIRST section of an additional
+#     file is read; a second section is silently ignored.
+#   - A malformed or empty file stops worldserver from starting, with the reason printed before
+#     the log opens ("Error in additional config files"). If the realm will not start after an
+#     edit here, that message is where to look.
+#   - Save it as plain UTF-8 WITHOUT a byte order mark. Several Windows editors add one silently,
+#     and the parser then reports "'=' character not found in line (...heimdall.conf:1)" and the
+#     realm does not start.
+#
+# THIS IS THE PHASE 1 SKELETON. It reads Heimdall.Enabled and writes one line at startup. No
+# tickets are polled, no commands are executed and nothing is sent to Discord yet.
+###################################################################################################
+
+[worldserver]
+
+# Enable the game-side bridge. Default 0.
+# In this build the setting only changes which line is logged at startup.
+Heimdall.Enabled = 0
+
+# Heimdall's log category. TrinityCore's stock "root" logger is at level 5 (error), and an
+# unconfigured category inherits from it - without this line Heimdall's startup message is
+# dropped rather than printed. Level 3 is Info. "Console Server" are the appenders defined in
+# worldserver.conf; if you renamed them there, rename them here too.
+Logger.heimdall = 3,Console Server
