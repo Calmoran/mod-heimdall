@@ -422,10 +422,17 @@ public:
 
         // Never disturb somebody who is actually playing. A misconfigured identity pointing at a
         // live account must refuse, not kick.
+        //
+        // The message says what to do because the short version was misread: a client sitting at
+        // the character-selection screen still holds a session, so "connected" is true there and
+        // the refusal looked like a lock that would clear on its own. It will not - the account has
+        // to leave, not just the character.
         uint32 accountId = itr->second.AccountId;
         if (sWorld->FindSession(accountId))
         {
-            message = Trinity::StringFormat("Account {} is connected right now - refusing to touch it.", accountId);
+            message = Trinity::StringFormat("Account {} has a session open right now (a client sitting at "
+                "character select still counts) - refusing to touch it. Log the account out to the login "
+                "screen, not just the character, then try again.", accountId);
             return false;
         }
 
@@ -589,6 +596,14 @@ private:
         // whispering it is told "no player named X is currently playing". An identity that is
         // invisible AND accepts whispers is a combination the core never sets up on its own, so
         // it has to be asked for in this order.
+        //
+        // WHAT "INVISIBLE" MEANS TO /who, because this cost a task to work out (T26): an invisible
+        // GM is hidden from a viewer only if that viewer is a plain player account, or if the
+        // identity outranks it - MiscHandler.cpp:329-332 skips the target when
+        // `IsPlayerAccount(viewer) || target.GetSecurity() > viewer.GetSecurity()`. The identity's
+        // session is SEC_GAMEMASTER, so ordinary players never see it and staff at or above
+        // gamemaster level always do. Staff seeing it in /who is the core working as designed, not
+        // this module failing. Re-check those line numbers if the core moves.
         player->SetGameMaster(true);
         player->SetGMVisible(false);
         player->SetAcceptWhispers(true);            // after SetGMVisible, never before
@@ -604,11 +619,17 @@ private:
         _heldGuids.insert(guid);
         PublishState(name, true);
 
-        // The four flags are read back off the player rather than assumed, because the order they
-        // were set in is the whole point (see above).
-        TC_LOG_INFO(HEIMDALL_LOG, "GM identity \"{}\" ({}) is held in-world on account {}: gameMaster={} invisible={} acceptWhispers={} gmChat={}.",
+        // The flags are read back off the player rather than assumed, because the order they were
+        // set in is the whole point (see above).
+        //
+        // Both invisibility values are printed, because they are not the same thing and confusing
+        // them cost a task. `invisible` is PLAYER_EXTRA_GM_INVISIBLE, the flag the GM commands set.
+        // `isVisible` is Unit::IsVisible(), the server-side visibility value, and it is the one
+        // /who consults (WhoListStorage.cpp:57-59). A line claiming invisibility that /who did not
+        // agree with is what sent T26 looking for a bug that was not there.
+        TC_LOG_INFO(HEIMDALL_LOG, "GM identity \"{}\" ({}) is held in-world on account {}: gameMaster={} invisible={} isVisible={} acceptWhispers={} gmChat={}.",
             name, guid.ToString(), accountId, player->IsGameMaster(), !player->isGMVisible(),
-            player->isAcceptWhispers(), player->isGMChat());
+            player->IsVisible(), player->isAcceptWhispers(), player->isGMChat());
     }
 
     // The companion bot shows whether a GM is reachable in game. It reads that from the existing
