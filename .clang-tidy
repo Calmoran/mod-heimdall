@@ -1,0 +1,65 @@
+# clang-tidy for the AzerothCore module (src/*.cpp).
+#
+# Deliberately narrow: this is a bug hunt, not a reformat. The four families below find real
+# defects - use-after-move, narrowing conversions, leaks, dead stores, copies that should be
+# references. Everything opinionated is off, because it would argue with AzerothCore's own
+# conventions and bury anything real under thousands of style opinions:
+#
+#   readability-*        naming, braces, magic numbers - style, not correctness
+#   modernize-*          would rewrite code that has to keep matching the core's idiom
+#   cppcoreguidelines-*  overlaps the above and assumes a codebase that owns its own types
+#   llvm-*, google-*     house styles of other projects
+#   fuchsia-*            rules for an OS we are not writing
+#
+# HeaderFilterRegex is the load-bearing line. Without it every warning in AzerothCore's own
+# headers - which are not ours to fix, and there are thousands - lands in the output and hides
+# ours. It matches this module's headers and nothing else.
+#
+# Run it with the compile database of an AzerothCore build tree that contains the module:
+#   clang-tidy -p <build-dir-with-compile_commands.json> src/*.cpp
+#
+# Never with -fix. Findings get read and decided on, not auto-applied.
+
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+  -misc-const-correctness,
+  -misc-use-internal-linkage
+
+HeaderFilterRegex: 'mod-heimdall[\\/]src[\\/]'
+
+FormatStyle: none
+WarningsAsErrors: ''
+
+# Why the four exclusions above, one line each:
+#
+#   bugprone-easily-swappable-parameters
+#       Fires on any function taking two parameters of the same type - RecordIngameTicket and
+#       friends take several strings by design. It is a design opinion, not a defect report.
+#
+#   misc-non-private-member-variables-in-classes
+#       The module's small state structs (Settings, Identity) are deliberately plain data.
+#
+#   misc-no-recursion
+#       Reports mutual recursion as a smell in its own right; it says nothing about correctness.
+#
+#   misc-include-cleaner
+#       Wants every transitively-used symbol included directly, which fights the core's umbrella
+#       headers and would add dozens of includes that AzerothCore's own files do not carry.
+#
+#   misc-const-correctness
+#       50 hits on the first run, every one of them "this local could be const". A style opinion
+#       filed under misc-*; adding const to fifty locals is exactly the churn this config exists
+#       to avoid.
+#
+#   misc-use-internal-linkage
+#       Wants Addmod_heimdall and Addmod_heimdallScripts made static. They cannot be: AzerothCore's
+#       generated loader calls them from another translation unit, so external linkage is the whole
+#       point of them.
