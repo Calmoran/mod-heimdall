@@ -2680,3 +2680,56 @@ test('a reply sends the GM identity and the words, never the recipient', async (
     'the module whispers whoever its ticket row names, resolved by GUID — the bot must not offer a name')
   assert.ok(!JSON.stringify(whisper.payload).includes('Bob'), 'the recipient leaked into the payload')
 })
+
+// A note is about the ACCOUNT, not about the ticket it was typed in. Add Note always passes the
+// ticket it was pressed in (discord.js), and the retention purge used to delete every audit row
+// carrying that ticket id - so every note taken inside a ticket died with it at
+// ArchiveRetentionDays, silently, months later. The schema had always promised otherwise
+// (deploy/heimdall-schema.sql:129-130). Fixed in 2.0.1; this is the regression guard.
+test('purging an expired ticket keeps the account notes taken inside it', async () => {
+  const executed = []
+  const pool = {
+    execute: async (sql, params = []) => {
+      executed.push({ sql, params })
+      return [[]]
+    },
+  }
+  const repository = new TicketRepository(pool, 'cerberus-1000-aaaaaa', 'cerberus')
+
+  await repository.purgeTicketContent(42)
+
+  const auditDelete = executed.find((entry) => entry.sql.startsWith('DELETE FROM heimdall_audit'))
+  assert.ok(auditDelete, 'the purge no longer touches heimdall_audit at all')
+  assert.match(auditDelete.sql, /action <> 'player_note'/,
+    'the purge deletes audit rows by ticket without sparing notes - every note taken in a ticket dies with it')
+  assert.deepEqual(auditDelete.params, [42])
+
+  // The rest of the purge is unchanged: transport and content still go.
+  for (const table of ['heimdall_event', 'heimdall_delivery', 'heimdall_attachment']) {
+    const statement = executed.find((entry) => entry.sql.startsWith(`DELETE FROM ${table}`))
+    assert.ok(statement, `${table} is no longer purged`)
+    assert.deepEqual(statement.params, [42])
+  }
+})
+
+// Surviving the purge is only half of it: a note that lives in the table but is filtered out of
+// the card is just as lost to the GM reading it.
+test('the note history the card reads is keyed on the account, not on a live ticket', async () => {
+  const executed = []
+  const pool = {
+    execute: async (sql, params = []) => {
+      executed.push({ sql, params })
+      return [[]]
+    },
+  }
+  const repository = new TicketRepository(pool, 'cerberus-1000-aaaaaa', 'cerberus')
+
+  await repository.playerNotes(7)
+
+  const query = executed.at(-1)
+  assert.match(query.sql, /subject_account_id = \?/, 'notes are not looked up by account')
+  assert.doesNotMatch(query.sql, /heimdall_ticket/,
+    'the note list joins the ticket table - a note would survive the purge and still vanish from the card')
+  assert.doesNotMatch(query.sql, /ticket_id/,
+    'the note list filters on ticket_id - notes would disappear when their ticket is purged')
+})
