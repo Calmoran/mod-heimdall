@@ -7,10 +7,14 @@
  * not a redesign: where it differs, a comment says which core behaviour forced it - search for
  * DIVERGENCE.
  *
- * It carries the whole bridge except the GM command audit, which needs a pre-command hook this
- * core does not have (heimdall_shared.h says why, and the places it would be called are marked
- * PHASE 4). One thing here is implemented but NOT proven: real-client takeover of a held identity,
- * in heimdall_login_watch at the bottom of this file.
+ * It carries the whole bridge except the GM command audit, which this core cannot support
+ * faithfully: there is no pre-command hook covering game, console and SOAP alike, so there is no
+ * switch for it and the three places it would be called say so where they are. heimdall_shared.h
+ * has the reasoning.
+ *
+ * Real-client takeover of a held identity - heimdall_login_watch, at the bottom of this file - was
+ * confirmed with a real client on 2026-09-04: the stand-down runs ahead of the core's own login,
+ * the world ends with one Player, and the character is intact across repeated cycles.
  */
 
 #include "AsyncCallbackProcessor.h"
@@ -831,8 +835,10 @@ public:
         }
 
         OpenTicketIndex::instance()->SetRealmTag(_settings.realmTag);
-        // PHASE 4: ConfigureCommandAudit() goes here on the AzerothCore side. This core has no
-        // faithful pre-command hook, so there is no audit to configure (heimdall_shared.h).
+        // The AzerothCore module configures its GM command audit here. This core has no faithful
+        // pre-command hook - nothing that sees game, console and SOAP commands alike before they
+        // run - so there is no audit to configure and no setting that turns one on. Deliberate, and
+        // documented in heimdall_shared.h, heimdall.conf.dist and the README in the same words.
         bool const firstRun = !LoadWatermark();
         if (firstRun)
             SeedFirstRun();
@@ -921,7 +927,7 @@ public:
 
     void OnShutdownInitiate(ShutdownExitCode /*code*/, ShutdownMask /*mask*/) override
     {
-        // PHASE 4: FlushCommandAudit() goes here on the AzerothCore side.
+        // The AzerothCore module flushes the tail of its command audit here; this core has none.
         // Release every held identity while the world is still up, so the characters are saved and
         // logged out properly rather than disappearing with the process.
         IdentityRegistry::instance()->LogoutAll();
@@ -1809,6 +1815,6 @@ void AddSC_heimdall()
     new heimdall_login_watch();
     new TicketCommandScript();
 
-    // PHASE 4: RegisterCommandAuditScript() goes here on the AzerothCore side. There is no
-    // faithful pre-command hook on this core, so there is no script to register.
+    // The AzerothCore module registers its command-audit script here. There is no faithful
+    // pre-command hook on this core, so there is no script to register - see OnStartup above.
 }

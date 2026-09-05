@@ -34,7 +34,7 @@ constexpr char const* HEIMDALL_LOG = "heimdall";
 // Log output only. Kept in step with the companion bot's package.json and the AzerothCore
 // HEIMDALL_VERSION: the halves release together, so one number answers "which Heimdall are you
 // running" for all of them.
-constexpr char const* HEIMDALL_VERSION = "2.0.0";
+constexpr char const* HEIMDALL_VERSION = "2.1.0";
 
 struct Settings
 {

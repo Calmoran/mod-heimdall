@@ -5,7 +5,7 @@
 # copy. Worldserver reads every .conf file in that directory at startup, so nothing in
 # worldserver.conf itself has to be changed.
 #
-# Two things worth knowing about how this core reads additional config files:
+# Three things worth knowing about how this core reads additional config files:
 #   - Keep the single [worldserver] section header below. Only the FIRST section of an additional
 #     file is read; a second section is silently ignored.
 #   - A malformed or empty file stops worldserver from starting, with the reason printed before

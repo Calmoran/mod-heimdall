@@ -4,10 +4,13 @@
 --
 -- Replace the two placeholders:
 --   heimdall            the database name - must match Heimdall.Database in heimdall.conf
---   'acore'@'localhost' the account the core's worldserver connects with (the user in
---                       CharacterDatabaseInfo in worldserver.conf, with the host MySQL sees it
---                       from - over TCP to 127.0.0.1 that is the '127.0.0.1' account, not
---                       'localhost'; SELECT user, host FROM mysql.user shows what exists)
+--   'acore'@'localhost' the account the core's worldserver actually authenticates as. Do not infer
+--                       it from the transport: MySQL picks a matching row out of its grant table,
+--                       and hostname resolution decides which. Ask the server instead - connect
+--                       with the host, port and credentials from CharacterDatabaseInfo in
+--                       worldserver.conf and run SELECT CURRENT_USER(). Grant exactly what that
+--                       prints. Granting a plausible-looking account that is not the matching one
+--                       leaves the module without access and reads like a wrong password.
 --
 -- The module creates its own tables at startup on the core's connection, so the core's account
 -- needs the right to create tables here. Nothing else does: the bot's account is set up by

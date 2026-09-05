@@ -82,5 +82,5 @@ git diff --stat
 You should see three files changed: `CharacterHandler.cpp`, `WorldSession.cpp` and
 `WorldSession.h`.
 
-Both patches touch `WorldSession.h`, which most of the core includes, so the build that follows is
-close to a full rebuild.
+Patch 0001 touches `WorldSession.h`, which most of the core includes, so the build that follows is
+close to a full rebuild. Patch 0002 touches only `WorldSession.cpp`.

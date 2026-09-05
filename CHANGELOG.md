@@ -3,6 +3,52 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 2.1.0 — 2026-09-04
+
+**Heimdall runs on TrinityCore.** The same tickets, the same Discord channels, the same two-way
+whispers, on `ElunaLuaEngine/ElunaTrinityWotlk` instead of AzerothCore. It lives in the new
+`trinitycore/` directory and shares the bot, the database schema and the version number with the
+AzerothCore module — one release, both cores.
+
+**What it costs you to install:** two small core patches (fifteen lines and six, both explained and
+both reviewable before you apply them), two lines added to one file of your own core
+(`custom_script_loader.cpp`), a rebuild, and a settings file dropped into `worldserver.conf.d`.
+`trinitycore/README.md` is the guide. TrinityCore has no module system, so the source is compiled
+into your worldserver rather than loaded beside it.
+
+**What is verified:** stock ElunaTrinityWotlk at `bb74941e`, on Windows, with a real game client —
+a GM's reply arriving as a whisper with the `<GM>` badge, a player's answer reaching the ticket
+channel, and a real client logging into a held GM identity and taking the character back cleanly.
+
+**What is not:** Linux and Docker are untested for TrinityCore. And the GM command audit does not
+exist on that core — recording who asked for each command needs a pre-command hook TrinityCore does
+not offer, and a partial audit is worse than none, so there is no setting for it. AzerothCore
+installs are unaffected either way.
+
+### Known defects, present in 2.0.0 too, fixed in 2.2
+
+None of these are new. They are listed because a release that only lists its good news is not worth
+reading.
+
+- A closed ticket's buttons still work: Revive, Teleport and the rest act on a ticket nobody
+  considers open any more.
+- Closing a ticket does not cancel replies already queued for it, so a whisper can arrive after the
+  player has been told the ticket is closed.
+- Reassigning a ticket in Discord does not reassign it on the realm; the realm still shows the
+  original GM.
+- `Heimdall.MaxWhisperBytes` does nothing. It is read, checked and printed at startup, and no
+  whisper is measured against it.
+- A GM identity whispering another GM identity records that outgoing line as if the receiving
+  identity's player had sent it. Only reachable when a GM's own character has an open ticket.
+- `.ban account` and `.kick` do not reach a held GM identity: it stays in the world and can still
+  whisper until it is logged out.
+
+### Thanks
+
+**@AbyssalJake** found the payload-trust flaw fixed in 2.0.0 — a delivery row could name its own
+target rather than being bound to its ticket — and offered to run the TrinityCore port on their
+server, which is why this release exists. `docs/SECURITY.md` records the finding.
+
 ## 2.0.1 — 2026-09-04
 
 Account notes taken inside a ticket were deleted along with that ticket when its transcript
