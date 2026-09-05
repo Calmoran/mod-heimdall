@@ -596,7 +596,16 @@ export class TicketRepository {
     await this.pool.execute('DELETE FROM heimdall_event WHERE ticket_id = ?', [ticketId])
     await this.pool.execute('DELETE FROM heimdall_delivery WHERE ticket_id = ?', [ticketId])
     await this.pool.execute('DELETE FROM heimdall_attachment WHERE ticket_id = ?', [ticketId])
-    await this.pool.execute('DELETE FROM heimdall_audit WHERE ticket_id = ?', [ticketId])
+    // Notes are the exception, and they are the whole point of subject_account_id: a note is about
+    // the ACCOUNT, not about the ticket it happened to be typed in, so it has to outlive that
+    // ticket to be worth taking at all. Add Note always passes the ticket it was pressed in, so
+    // before 2.0.1 every note taken inside a ticket was deleted with it at ArchiveRetentionDays -
+    // silently, months later, exactly when the history was most worth having. The schema has always
+    // said otherwise (deploy/heimdall-schema.sql:129-130); this clause is what makes it true.
+    //
+    // The note keeps its ticket_id rather than having it nulled: which ticket a note was taken in
+    // is useful history and costs nothing to keep.
+    await this.pool.execute("DELETE FROM heimdall_audit WHERE ticket_id = ? AND action <> 'player_note'", [ticketId])
     await this.pool.execute(
       "UPDATE heimdall_ticket SET player_name = NULL, discord_creator_id = NULL, claimant_discord_user_id = NULL, claimant_gm_name = NULL, discord_channel_id = NULL, summary = NULL, transcript_expires_at = NULL, version = version + 1 WHERE id = ?",
       [ticketId],

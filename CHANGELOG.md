@@ -3,6 +3,22 @@
 One version for both halves: the realm module and the Discord bot release together from this
 repository, and each prints the version in its startup line.
 
+## 2.0.1 — 2026-09-04
+
+Account notes taken inside a ticket were deleted along with that ticket when its transcript
+expired, which is `Heimdall.ArchiveRetentionDays` days after it closed - 180 by default. Notes are
+supposed to follow the account and show up on every future ticket that account opens, which is what
+the README, the feature list and the database schema all say; the retention purge simply did not
+know that, and cleared every audit row belonging to the ticket. Notes now survive the purge and
+keep showing up in the player's history, and nothing else about retention changes.
+
+**Present since 2.0.0.** If a note has already been lost this way it cannot be recovered, and a
+note is only at risk once its ticket's transcript has expired - so on an install younger than its
+retention setting, nothing has been lost yet. Upgrading is a pull and a restart of the bot; there
+is no schema change and the realm module is unaffected.
+
+Found by an outside code review.
+
 ## 2.0.0 — 2026-09-04
 
 Heimdall's tables leave the realm's characters database, and the ticket channel is rebuilt around
